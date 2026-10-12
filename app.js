@@ -20,7 +20,7 @@ const SIDELINE_REASONS = ['Injury', 'Bathroom', 'Other'];
 const DEMO_TEAM = ['Avery', 'Bea', 'Cruz', 'Dev', 'Emery', 'Finn', 'Gia', 'Hollis', 'Ines', 'Jules'];
 
 let store = load();
-let view = { screen: 'home', summaryId: null, draft: null, setup: null, sheet: null, confirm: null };
+let view = { screen: 'home', summaryId: null, draft: null, setup: null, sheet: null, confirm: null, keep: new Set() };
 let undoStack = [];
 const alerted = { heads: null, due: null };
 
@@ -231,6 +231,7 @@ function doSubs(pairs, planned = false) {
   pairs.forEach(([off, on]) => swap(off, on, t));
   if (planned && g.nextSubAt != null) g.nextSubAt = nextWindow(g, Math.max(t, g.nextSubAt));
   else windowHandled(g, t);
+  view.keep.clear();
   view.sheet = null; save(); render();
 }
 function swap(off, on, t) {
@@ -242,6 +243,7 @@ function swap(off, on, t) {
 function skipWindow() {
   const g = G();
   g.nextSubAt = nextWindow(g, Math.max(now(g), g.nextSubAt));
+  view.keep.clear();
   save(); render();
 }
 
@@ -425,7 +427,7 @@ const $sheet = document.getElementById('sheet-root');
 function go(screen) {
   view.screen = screen; view.sheet = null; view.confirm = null;
   if (screen === 'setup') {
-    view.setup = { present: new Set(store.roster.map(r => r.id)), onField: store.settings.onField, quarterMin: store.settings.quarterMin, opponent: '' };
+    view.setup = { present: new Set(), onField: store.settings.onField, quarterMin: store.settings.quarterMin, opponent: '' };
   }
   if (screen === 'lineup' && !view.draft) view.draft = suggestLineup(G());
   render();
@@ -547,7 +549,7 @@ function renderSetup() {
       <label class="field"><span>Opponent <small>optional</small></span><input id="opponent" value="${esc(s.opponent)}" placeholder="e.g. Blue Hawks" autocapitalize="words"></label>
     </div>
 
-    <p class="hint">${n < s.onField ? `You need at least ${s.onField} players for ${s.onField} a side.`
+    <p class="hint">${n === 0 ? `Tap each player who's here today.` : n < s.onField ? `You need at least ${s.onField} players for ${s.onField} a side.`
       : B <= 0 ? `Exactly enough players. Everyone plays the whole game, no subs.`
       : planBlurb(computePlan({ onField: s.onField, quarterSec: s.quarterMin * 60, players: Object.fromEntries([...s.present].map(id => [id, { state: 'bench' }])) }))}</p>
 
@@ -605,6 +607,7 @@ function renderLive() {
   const bench = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
   const out = Object.values(g.players).filter(p => p.state === 'out');
   const pairs = g.plan?.k ? suggest(g, t, g.plan.k) : [];
+  const chosen = pairs.filter(([o]) => !view.keep.has(o.id));
   const last = g.quarter >= QUARTERS;
 
   return `
@@ -636,16 +639,21 @@ function renderLive() {
   : pairs.length && (st === 'due' || st === 'soon') ? `
     <section class="callout ${st}">
       <h2>${st === 'due' ? 'Sub now' : 'Get ready to sub'}</h2>
-      <ul class="pairs">${pairs.map(([o, i]) => `
-        <li><span class="po"><small>Off</small>${esc(o.name)}</span>${I.arrow}<span class="pi"><small>On</small>${esc(i.name)}</span></li>`).join('')}</ul>
-      <div class="row-btns"><button class="cta dark" data-act="do-subs"><span class="cta-t">Make ${pairs.length === 1 ? 'this sub' : 'these subs'}</span></button>
-      <button class="ghost light" data-act="skip">Skip</button></div>
+      <p class="pair-hint">Suggested swaps. Tap one to keep that player on.</p>
+      <ul class="pairs">${pairs.map(([o, i]) => { const kept = view.keep.has(o.id); return `
+        <li><button class="pair ${kept ? 'kept' : ''}" data-act="toggle-pair" data-id="${o.id}" aria-pressed="${!kept}">
+          <span class="po"><small>${kept ? 'Stays on' : 'Off'}</small>${esc(o.name)}</span>${I.arrow}<span class="pi"><small>${kept ? 'Stays on bench' : 'On'}</small>${esc(i.name)}</span>
+        </button></li>`; }).join('')}</ul>
+      <div class="row-btns">${chosen.length
+        ? `<button class="cta dark" data-act="do-subs"><span class="cta-t">Make ${chosen.length === 1 ? 'this sub' : `these ${chosen.length}`}</span></button>`
+        : `<button class="cta dark" data-act="skip"><span class="cta-t">Keep everyone on</span></button>`}
+      ${chosen.length ? '<button class="ghost light" data-act="skip">Skip</button>' : ''}</div>
     </section>`
   : pairs.length ? `
     <section class="ondeck">
       <span class="od-k">Up next</span>
-      <span class="od-v"><b>${pairs.map(p => esc(p[1].name)).join(', ')}</b> in for ${pairs.map(p => esc(p[0].name)).join(', ')}</span>
-      <button class="link" data-act="do-subs">Sub now</button>
+      <span class="od-v">${chosen.length ? `<b>${chosen.map(p => esc(p[1].name)).join(', ')}</b> in for ${chosen.map(p => esc(p[0].name)).join(', ')}` : 'Everyone stays on'}</span>
+      ${chosen.length ? '<button class="link" data-act="do-subs">Sub now</button>' : ''}
     </section>` : ''}
 
   <section class="pad stack-sm">
@@ -884,7 +892,8 @@ const actions = {
   'close-sheet': () => { view.sheet = null; view.confirm = null; renderSheet(); },
   player: d => { view.sheet = { type: 'player', id: d.id }; renderSheet(); },
   swap: d => { const g = G(); doSubs([[g.players[d.off], g.players[d.on]]]); },
-  'do-subs': () => { const g = G(); doSubs(suggest(g, now(g), g.plan.k), true); },
+  'do-subs': () => { const g = G(); doSubs(suggest(g, now(g), g.plan.k).filter(([o]) => !view.keep.has(o.id)), true); },
+  'toggle-pair': d => { view.keep.has(d.id) ? view.keep.delete(d.id) : view.keep.add(d.id); render(); },
   skip: skipWindow,
   'make-gk': d => makeGoalie(d.id),
   sideline: d => {

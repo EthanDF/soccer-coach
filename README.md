@@ -4,9 +4,9 @@ A sideline sub timer for youth soccer that keeps playing time fair. It's an offl
 
 ## What it does
 
-- **Roster once, attendance per game.** Add the team once (or paste a list), then tap who showed up. Names stay on your phone (and your own Google Sheet), never in this repo. Try it with **Load demo team** on the roster screen.
+- **Roster once, attendance per game.** Add the team once (or paste a list). Each game day everyone starts absent, and you tap who showed up. Names stay on your phone (and your own Google Sheet), never in this repo. Try it with **Load demo team** on the roster screen.
 - **Auto sub plan.** From the players present, field size, and quarter length, it picks how many to swap and how often. It aims for ~5-minute runs, keeps bench stints under ~4 minutes when the roster allows, and never asks for subs more often than every 2:30. Sub windows divide each quarter evenly.
-- **Sub cues.** A "get ready" chime 20 s before a window, then the scoreboard turns orange with "Sub now" and the exact swaps: most-played off, least-played on. It never pulls a kid who went on in the last 90 s.
+- **Sub cues.** A "get ready" chime 20 s before a window, then the scoreboard turns orange with "Sub now" and suggested swaps: most-played off, least-played on. It never suggests pulling a kid who went on in the last 90 s. They're only suggestions: tap a swap to keep a kid who's on a roll, skip the window, or make any sub by hand. You're the coach.
 - **Fair share, not team average.** While a kid is available, they earn an equal slice of field time. Time they weren't there (late arrival, injury, bathroom) earns nothing. So nobody is penalized for missing time, and the app doesn't over-play them to catch up. Every player row shows minutes played and a meter for how far above or below their own fair share they are. Subs and lineups go to whoever is most owed.
 - **Goalies.** Pick a goalie per quarter. Goalie time counts as playing time. The lineup suggests whoever has kept goal the fewest quarters.
 - **Sideline.** Injury, bathroom, or other. On the field, you pick a replacement (or play short). "Back on the bench" returns them.
