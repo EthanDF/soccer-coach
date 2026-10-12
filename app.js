@@ -57,17 +57,19 @@ function now(g = G()) {
   return Math.min(t, qEnd(g));
 }
 const running = g => !!g.clock.since;
-const played = (p, t) => p.played + (p.state === 'field' ? t - p.since : 0);
+// p.since = when the current shift/bench stint began; p.bank = when field time was last banked.
+const banked = p => p.bank ?? p.since;
+const played = (p, t) => p.played + (p.state === 'field' ? t - banked(p) : 0);
 const stint = (p, t) => t - p.since;
 
 // Bank time on the field up to t.
 function flush(p, t) {
   if (p.state === 'field') {
-    const d = t - p.since;
+    const d = t - banked(p);
     p.played += d;
     if (p.gk) p.gkSec += d;
-    p.since = t;
   }
+  p.bank = t;
 }
 function move(p, state, t) {
   flush(p, t);
@@ -76,8 +78,10 @@ function move(p, state, t) {
     p.state = state;
     p.since = t;
   }
+  p.bank = t;
   if (state !== 'field') p.gk = false;
 }
+const short = g => g.phase === 'live' && onField(g).length < g.onField;
 const avail = g => Object.values(g.players).filter(p => p.state !== 'out');
 const onField = g => Object.values(g.players).filter(p => p.state === 'field');
 const onBench = g => Object.values(g.players).filter(p => p.state === 'bench');
@@ -88,9 +92,9 @@ const onBench = g => Object.values(g.players).filter(p => p.state === 'bench');
    aren't penalized, but the app doesn't over-play them to catch up either. */
 function shareRate(g) {
   const n = avail(g).length;
-  return n ? Math.min(g.onField, n) / n : 0;
+  return n ? Math.min(onField(g).length, n) / n : 0;
 }
-// Bank everyone's fair share up to t. Call before anyone's availability changes.
+// Bank everyone's fair share up to t. Call before availability or field size changes.
 function accrue(g, t) {
   const dt = t - (g.fairT ?? t);
   if (dt > 0) { const r = shareRate(g); avail(g).forEach(p => { p.fair = (p.fair || 0) + dt * r; }); }
@@ -194,6 +198,7 @@ function createGame() {
 
 function startQuarter() {
   const g = G(), d = view.draft, t = now(g);
+  accrue(g, t);
   avail(g).forEach(p => move(p, p.id === d.gk || d.field.has(p.id) ? 'field' : 'bench', t));
   const gk = g.players[d.gk];
   gk.gk = true; gk.gkQ++;
@@ -268,6 +273,18 @@ function sideline(id, reason, replacementId) {
     if (wasGk) { flush(r, t); r.gk = true; }
   }
   replan(g, t);
+  view.sheet = null; save(); render();
+}
+
+// Put a bench or sidelined player into an empty spot (after playing short).
+function fillSpot(id) {
+  const g = G(), t = now(g), p = g.players[id];
+  pushUndo();
+  accrue(g, t);
+  const wasOut = p.state === 'out';
+  move(p, 'field', t); p.reason = null;
+  if (!onField(g).some(x => x.gk)) p.gk = true; // empty net gets filled first
+  if (wasOut) replan(g, t);
   view.sheet = null; save(); render();
 }
 
@@ -657,7 +674,7 @@ function renderLive() {
     </section>` : ''}
 
   <section class="pad stack-sm">
-    <div class="sec-h"><h2>On the field <span>${field.length}</span></h2><span class="legend">vs fair share</span></div>
+    <div class="sec-h"><h2>On the field <span>${field.length}${short(g) ? `<em class="short">of ${g.onField} · playing short</em>` : ''}</span></h2><span class="legend">vs fair share</span></div>
     <ul class="players">${field.map(p => playerRow(p, t)).join('')}</ul>
     ${bench.length ? `
     <div class="sec-h"><h2>Bench <span>${bench.length}</span></h2><span class="legend">most owed first</span></div>
@@ -810,11 +827,13 @@ function renderSheet() {
         <button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="swap" data-off="${p.id}" data-on="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>` : '';
       if (!p.gk) body += `<button class="btn alt wide" data-act="make-gk" data-id="${p.id}">${I.glove} Put in goal</button>`;
     } else if (p.state === 'bench') {
+      if (short(g)) body += `<button class="btn wide" data-act="fill" data-id="${p.id}">Put on: fill the empty spot</button>`;
       const cands = onField(g).sort((a, b) => a.gk - b.gk || gap(g, b, t) - gap(g, a, t));
       body += `<h3>Bring on, take off…</h3><div class="pick">${cands.map((c, i) => `
         <button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="swap" data-off="${c.id}" data-on="${p.id}">${c.gk ? 'GK · ' : ''}${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>`;
     }
-    if (p.state === 'out') body += `<button class="btn wide" data-act="return" data-id="${p.id}">Back on the bench</button>`;
+    if (p.state === 'out') body += (short(g) ? `<button class="btn wide" data-act="fill" data-id="${p.id}">Back on the field</button>` : '')
+      + `<button class="btn ${short(g) ? 'alt ' : ''}wide" data-act="return" data-id="${p.id}">Back on the bench</button>`;
     else body += `<h3>Sideline for a bit</h3><div class="reasons">${SIDELINE_REASONS.map(r => `<button class="reason" data-act="sideline" data-id="${p.id}" data-reason="${r}">${r}</button>`).join('')}</div>`;
   }
   else if (s.type === 'replace') {
@@ -823,6 +842,10 @@ function renderSheet() {
     body = `<h2>Who replaces ${esc(p.name)}?</h2><p class="hint">${esc(s.reason)}${p.gk ? ' · they were in goal, so the replacement takes the gloves.' : ''}</p>
       <div class="pick">${cands.map((c, i) => `<button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="sideline-confirm" data-rep="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>
       ${p.gk ? '' : `<button class="btn alt wide" data-act="sideline-confirm" data-rep="">Nobody. Play a player short.</button>`}`;
+  }
+  else if (s.type === 'newgk') {
+    body = `<h2>Who goes in goal?</h2><p class="hint">Nobody on the bench, so you're playing short. Pick a keeper from the field.</p>
+      <div class="pick">${onField(g).map(c => `<button class="pick-btn" data-act="make-gk" data-id="${c.id}">${esc(c.name)}</button>`).join('')}</div>`;
   }
   else if (s.type === 'menu') {
     const inLive = g.phase === 'live';
@@ -896,11 +919,13 @@ const actions = {
   'toggle-pair': d => { view.keep.has(d.id) ? view.keep.delete(d.id) : view.keep.add(d.id); render(); },
   skip: skipWindow,
   'make-gk': d => makeGoalie(d.id),
+  fill: d => fillSpot(d.id),
   sideline: d => {
     const g = G(), p = g.players[d.id];
-    // With nobody on the bench, a sidelined goalie leaves the net empty; tap a field player → "Put in goal".
-    if (p.state === 'field' && g.phase === 'live' && onBench(g).length) { view.sheet = { type: 'replace', id: d.id, reason: d.reason }; renderSheet(); }
-    else sideline(d.id, d.reason, null);
+    if (p.state === 'field' && g.phase === 'live' && onBench(g).length) { view.sheet = { type: 'replace', id: d.id, reason: d.reason }; renderSheet(); return; }
+    const wasGk = p.gk;
+    sideline(d.id, d.reason, null); // nobody to bring on: play short
+    if (wasGk && onField(g).length) { view.sheet = { type: 'newgk' }; renderSheet(); }
   },
   'sideline-confirm': d => sideline(view.sheet.id, view.sheet.reason, d.rep || null),
   return: d => {
