@@ -2,3 +2,4 @@
 apps-script/Secret.gs
 .clasp.json
 roster*.local.*
+apps-script/.deployment-id

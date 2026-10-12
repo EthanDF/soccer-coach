@@ -1,13 +1,21 @@
 /**
  * Assistant Coach → Google Sheet receiver.
- * Paste into Extensions → Apps Script on your season spreadsheet, then
- * Deploy → New deployment → Web app (Execute as: Me, Who has access: Anyone).
- * Copy the /exec URL into the app's Settings, with ?key=<SYNC_KEY> appended.
+ * Set up with scripts/setup-sheet.sh (creates the sheet, deploys, prints a
+ * one-tap connect link). Manual route: paste into Extensions → Apps Script,
+ * Deploy → Web app (Execute as: Me, Who has access: Anyone), and put the
+ * /exec URL with ?key=<SYNC_KEY> in the app's Settings.
  * SYNC_KEY lives in Secret.gs (not committed); see Secret.gs.example.
  */
 const MINUTES_SHEET = 'Minutes';
 const TOTALS_SHEET = 'Season Totals';
 const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Quarter Length', 'On Field', 'Players Present', 'Received', 'Fair Share Minutes'];
+
+// Connection test from the app's Settings: confirms the key and names the sheet.
+function doGet(e) {
+  if (typeof SYNC_KEY !== 'undefined' && e.parameter.key !== SYNC_KEY) return json_({ ok: false, error: 'bad key' });
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return json_({ ok: true, name: ss.getName() });
+}
 
 function doPost(e) {
   const lock = LockService.getScriptLock();

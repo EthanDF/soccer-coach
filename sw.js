@@ -1,5 +1,5 @@
 // Offline-first: app shell is precached; Google Fonts are cached on first use.
-const VERSION = 'ac-v2';
+const VERSION = 'ac-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'vendor/NoSleep.min.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

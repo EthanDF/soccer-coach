@@ -1,6 +1,6 @@
 # Assistant Coach
 
-A sideline sub timer for youth soccer that keeps playing time fair. It's an offline-first PWA: no build step, no server, and everything is stored on the phone. Finished games sync to a Google Sheet when you're back online.
+A sideline sub timer for youth soccer that keeps playing time fair. Purple and gold, after our namesake club, with every text color checked for WCAG AA contrast. It's an offline-first PWA: no build step, no server, and everything is stored on the phone. Finished games sync to a Google Sheet when you're back online.
 
 ## What it does
 
@@ -31,14 +31,17 @@ Host it anywhere with HTTPS (GitHub Pages, Vercel, Netlify). Open it in Safari, 
 
 ## Google Sheet sync
 
-The receiver is in `apps-script/` and is managed with [clasp](https://github.com/google/clasp).
+One command sets it up. It's managed with [clasp](https://github.com/google/clasp) (`npm i -g @google/clasp && clasp login`).
 
-1. `apps-script/Secret.gs` holds `SYNC_KEY` (not committed; copy `Secret.gs.example` to make one).
-2. `clasp push && clasp create-deployment` deploys it as a web app.
-3. **First time only:** open the script (`clasp open-script`), choose `setup`, click **Run**, and approve access. This creates the `Minutes` and `Season Totals` tabs.
-4. In the app, open **Settings** and paste `https://script.google.com/macros/s/<deployment-id>/exec?key=<SYNC_KEY>`.
+```sh
+./scripts/setup-sheet.sh
+```
 
-Each finished game appends one row per player (date, opponent, minutes, goalie minutes, shifts). Re-sends are de-duplicated by game ID. `Season Totals` rolls up minutes per player across the season.
+The first run creates a sync key (`apps-script/Secret.gs`, not committed) and a new **Assistant Coach Season Log** sheet in your Drive, then deploys the receiving script. It finishes by printing a **connect link**. Text or AirDrop it to your phone and open it: the app links itself and shows "Connected to …". Re-running the script is safe: it pushes script changes to the same web-app address and prints the link again.
+
+First time only, Google needs you to authorize the script. If the script says so, run `clasp open-script`, choose `setup`, click **Run**, and approve.
+
+Each finished game appends one row per player (date, opponent, minutes, goalie minutes, shifts, fair-share minutes). Re-sends are de-duplicated by game ID. The **Season Totals** tab rolls up minutes per player. In the app, **Settings → Test connection** checks the link at any time.
 
 ## Files
 
@@ -47,6 +50,7 @@ Each finished game appends one row per player (date, opponent, minutes, goalie m
 | `index.html`, `styles.css`, `app.js` | The app (vanilla JS, no build) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Offline + installable PWA |
 | `apps-script/` | Google Sheet receiver (clasp project) |
+| `scripts/setup-sheet.sh` | One-command sheet setup + phone connect link |
 
 ## Ideas for v2
 

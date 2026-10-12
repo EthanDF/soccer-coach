@@ -788,16 +788,62 @@ function renderSummary() {
 
 /* ---------- settings ---------- */
 
+// Sheet connection status shown in Settings (not persisted).
+let conn = { state: 'idle' };
+function connText() {
+  const name = conn.name || store.settings.sheetName;
+  return { idle: name ? `Linked to <b>${esc(name)}</b>.` : 'Linked. Tap Test connection to check it.',
+    testing: 'Checking…',
+    ok: `Connected to <b>${esc(conn.name)}</b>.`,
+    bad: esc(conn.msg || 'Could not reach the sheet.') }[conn.state];
+}
+async function testSheet() {
+  const url = store.settings.sheetUrl;
+  if (!url) return;
+  conn = { state: 'testing' }; if (view.screen === 'settings') render();
+  try {
+    const r = await fetch(url, { redirect: 'follow' });
+    const j = await r.json().catch(() => null);
+    if (j?.ok) { conn = { state: 'ok', name: j.name }; store.settings.sheetName = j.name; save(); }
+    else if (j?.error === 'bad key') conn = { state: 'bad', msg: 'The sheet rejected this link (wrong key). Make a fresh connect link.' };
+    else conn = { state: 'bad', msg: 'The sheet script isn\'t answering. It may need its one-time authorization: open the script, run "setup", and approve.' };
+  } catch {
+    conn = { state: 'bad', msg: navigator.onLine ? 'Couldn\'t reach Google. Check the link.' : 'You\'re offline. Games will sync when you\'re back online.' };
+  }
+  if (view.screen === 'settings') render();
+}
+// A connect link looks like https://…/soccer-coach/#sync=<encoded web-app URL with key>.
+// The hash never reaches the web server.
+function connectFromLink() {
+  const m = location.hash.match(/^#sync=(.+)$/);
+  if (!m) return false;
+  history.replaceState(null, '', location.pathname + location.search);
+  let url;
+  try { url = decodeURIComponent(m[1]); } catch { return false; }
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec(\?key=[\w-]+)?$/.test(url)) return false;
+  store.settings.sheetUrl = url; save();
+  return true;
+}
+
 function renderSettings() {
   const url = store.settings.sheetUrl;
   return `
   ${topbar('Settings', 'home')}
   <section class="stack pad">
     <div class="card">
-      <div class="card-h"><h2>Google Sheet sync</h2>${url ? '<span class="pill ok">Connected</span>' : ''}</div>
-      <p class="hint">Paste the Web App URL from the Apps Script in <code>apps-script/Code.gs</code> (see README). Finished games are sent when you're online. Each game is sent once.</p>
-      <label class="field"><span>Web App URL</span><input id="sheet-url" value="${esc(url)}" placeholder="https://script.google.com/macros/s/…/exec" inputmode="url" autocapitalize="off" spellcheck="false"></label>
-      <div class="row-btns"><button class="btn" data-act="save-url">Save</button>${url ? '<button class="btn alt" data-act="sync">Sync now</button>' : ''}</div>
+      <div class="card-h"><h2>Google Sheet sync</h2>${url ? `<span class="pill ${conn.state === 'bad' ? 'warn' : 'ok'}">${conn.state === 'bad' ? 'Problem' : 'Linked'}</span>` : ''}</div>
+      ${url ? `
+        <p class="conn ${conn.state}">${connText()}</p>
+        <div class="row-btns"><button class="btn" data-act="test-sheet">Test connection</button><button class="btn alt" data-act="sync">Sync now</button></div>
+        <p class="hint">Finished games are sent automatically whenever you're online. Each game is saved once.</p>
+        <details class="change"><summary>Change or remove link</summary>
+          <label class="field"><span>Sync link</span><input id="sheet-url" value="${esc(url)}" inputmode="url" autocapitalize="off" spellcheck="false"></label>
+          <div class="row-btns"><button class="btn" data-act="save-url">Save</button><button class="btn alt" data-act="unlink">Remove</button></div>
+        </details>`
+      : `
+        <p class="hint"><b>Easiest:</b> open your connect link on this phone, and the app links itself. Run <code>scripts/setup-sheet.sh</code> on your computer to make one. Or paste the sync link here.</p>
+        <label class="field"><span>Sync link</span><input id="sheet-url" placeholder="https://script.google.com/macros/s/…/exec?key=…" inputmode="url" autocapitalize="off" spellcheck="false"></label>
+        <div class="row-btns"><button class="btn" data-act="save-url">Connect</button></div>`}
     </div>
     <div class="card">
       <div class="card-h"><h2>How subs are planned</h2></div>
@@ -946,8 +992,12 @@ const actions = {
   discard: () => { if (view.confirm === 'discard') discardGame(); else { view.confirm = 'discard'; renderSheet(); } },
   'save-url': () => {
     store.settings.sheetUrl = document.getElementById('sheet-url').value.trim();
-    save(); render(); syncAll();
+    store.settings.sheetName = '';
+    save(); render();
+    if (store.settings.sheetUrl) { testSheet(); syncAll(); }
   },
+  'test-sheet': testSheet,
+  unlink: () => { store.settings.sheetUrl = ''; store.settings.sheetName = ''; conn = { state: 'idle' }; save(); render(); },
   sync: () => { store.history.forEach(h => { if (h.id === view.summaryId) h.synced = false; }); syncAll(); },
   'del-game': d => {
     if (view.confirm !== 'del-game') { view.confirm = 'del-game'; render(); return; }
@@ -987,10 +1037,13 @@ document.addEventListener('input', e => {
 /* ---------- boot ---------- */
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+const linked = connectFromLink();
 if (G()) {
   view.screen = G().phase === 'lineup' ? 'lineup' : 'live';
   if (G().phase === 'lineup') view.draft = suggestLineup(G());
   else keepAwake(true);
 }
+else if (linked) view.screen = 'settings';
 render();
+if (linked) testSheet();
 syncAll();
