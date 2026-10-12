@@ -228,7 +228,8 @@ input:focus, textarea:focus { border-color: var(--pitch); }
 .is-gk .lu-state { background: var(--lime); color: #142306; }
 .lu-name { flex: 1; font-weight: 700; display: grid; }
 .lu-name small { font-weight: 400; color: var(--muted); }
-.lu-time { font: 800 22px/1 var(--display); color: var(--muted); font-variant-numeric: tabular-nums; }
+.lu-time { font: 800 22px/1 var(--display); color: var(--muted); font-variant-numeric: tabular-nums; display: grid; justify-items: end; gap: 2px; }
+.lu-time small { font: 700 12px/1 var(--body); }
 .glove { width: 58px; border-radius: 12px; background: var(--card); color: var(--muted); display: grid; place-items: center; box-shadow: var(--shadow); }
 .glove svg { width: 26px; height: 26px; }
 .glove.on { background: var(--lime); color: #142306; }
@@ -265,6 +266,10 @@ input:focus, textarea:focus { border-color: var(--pitch); }
 .clock { font: 900 92px/.9 var(--display); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 .clock-sub { font-size: 14px; opacity: .75; margin-top: 2px; }
 .clock-sub span { font-weight: 700; font-variant-numeric: tabular-nums; }
+.awake { margin-top: 6px; font-size: 13px; font-weight: 700; padding: 4px 10px 4px 22px; border-radius: 99px; position: relative; background: var(--orange); color: #1B0A03; }
+.awake::before { content: ''; position: absolute; left: 9px; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: currentColor; }
+.awake.on { background: rgba(0, 0, 0, .22); color: var(--lime); }
+.board.due .awake.on { color: #1B0A03; background: rgba(255, 255, 255, .2); }
 .play {
   width: 84px; height: 84px; border-radius: 50%; display: grid; place-items: center; flex: none;
   background: var(--lime); color: #142306;
@@ -358,7 +363,7 @@ input:focus, textarea:focus { border-color: var(--pitch); }
 .b-track { position: relative; height: 14px; }
 .b-track i { position: absolute; inset: 0 auto 0 0; background: var(--pitch); border-radius: 0 4px 4px 0; }
 @media (prefers-color-scheme: dark) { .b-track i { background: var(--ok); } }
-.b-track::after, .avg-key { content: ''; position: absolute; left: var(--avg); top: -5px; bottom: -5px; width: 2px; background: var(--orange); }
+.b-track::after, .avg-key { content: ''; position: absolute; left: var(--avg); top: -5px; bottom: -5px; width: 3px; margin-left: -1.5px; border-radius: 2px; background: var(--orange); }
 .avg-key { position: static; display: inline-block; width: 2px; height: 12px; }
 .b-val { font: 800 20px/1 var(--display); font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
 .sync p { margin: 0 0 12px; }

@@ -22,7 +22,6 @@ const DEMO_TEAM = ['Avery', 'Bea', 'Cruz', 'Dev', 'Emery', 'Finn', 'Gia', 'Holli
 let store = load();
 let view = { screen: 'home', summaryId: null, draft: null, setup: null, sheet: null, confirm: null };
 let undoStack = [];
-let wakeLock = null;
 const alerted = { heads: null, due: null };
 
 /* ---------- persistence ---------- */
@@ -82,10 +81,23 @@ function move(p, state, t) {
 const avail = g => Object.values(g.players).filter(p => p.state !== 'out');
 const onField = g => Object.values(g.players).filter(p => p.state === 'field');
 const onBench = g => Object.values(g.players).filter(p => p.state === 'bench');
-function avgPlayed(g, t) {
-  const ps = Object.values(g.players);
-  return ps.length ? ps.reduce((s, p) => s + played(p, t), 0) / ps.length : 0;
+
+/* Fair share: while a kid is available (here and not sidelined) they earn
+   an equal slice of the field time — onField / available per game second.
+   Time they weren't available earns nothing, so late arrivals and injuries
+   aren't penalized, but the app doesn't over-play them to catch up either. */
+function shareRate(g) {
+  const n = avail(g).length;
+  return n ? Math.min(g.onField, n) / n : 0;
 }
+// Bank everyone's fair share up to t. Call before anyone's availability changes.
+function accrue(g, t) {
+  const dt = t - (g.fairT ?? t);
+  if (dt > 0) { const r = shareRate(g); avail(g).forEach(p => { p.fair = (p.fair || 0) + dt * r; }); }
+  g.fairT = t;
+}
+const fair = (g, p, t) => (p.fair || 0) + (p.state !== 'out' ? Math.max(0, t - (g.fairT ?? t)) * shareRate(g) : 0);
+const gap = (g, p, t) => played(p, t) - fair(g, p, t);
 
 /* ---------- sub planning ----------
    S skaters on the field, B extra skaters on the bench.
@@ -130,8 +142,8 @@ function subStatus(g, t) {
 // Most-played skaters come off (skip anyone who just went on); least-played go in.
 function suggest(g, t, k) {
   const out = onField(g).filter(p => !p.gk && stint(p, t) >= FRESH)
-    .sort((a, b) => played(b, t) - played(a, t) || stint(b, t) - stint(a, t));
-  const inn = onBench(g).sort((a, b) => played(a, t) - played(b, t) || a.since - b.since);
+    .sort((a, b) => gap(g, b, t) - gap(g, a, t) || stint(b, t) - stint(a, t));
+  const inn = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t) || a.since - b.since);
   const n = Math.min(k, out.length, inn.length);
   return Array.from({ length: n }, (_, i) => [out[i], inn[i]]);
 }
@@ -139,9 +151,9 @@ function suggest(g, t, k) {
 function suggestLineup(g) {
   const t = now(g);
   const ps = avail(g);
-  const byPlayed = (a, b) => played(a, t) - played(b, t);
-  const gk = [...ps].sort((a, b) => a.gkQ - b.gkQ || byPlayed(a, b))[0];
-  const field = ps.filter(p => p !== gk).sort(byPlayed).slice(0, g.onField - 1).map(p => p.id);
+  const byGap = (a, b) => gap(g, a, t) - gap(g, b, t);
+  const gk = [...ps].sort((a, b) => a.gkQ - b.gkQ || byGap(a, b))[0];
+  const field = ps.filter(p => p !== gk).sort(byGap).slice(0, g.onField - 1).map(p => p.id);
   return { gk: gk?.id ?? null, field: new Set(field) };
 }
 
@@ -149,7 +161,7 @@ function suggestLineup(g) {
 
 function pushUndo() {
   const g = G();
-  undoStack.push(JSON.stringify({ players: g.players, plan: g.plan, nextSubAt: g.nextSubAt }));
+  undoStack.push(JSON.stringify({ players: g.players, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
   if (undoStack.length > 20) undoStack.shift();
 }
 function undo() {
@@ -166,14 +178,14 @@ function createGame() {
   const t = 0;
   const players = {};
   store.roster.filter(r => s.present.has(r.id)).forEach(r => {
-    players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null };
+    players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0 };
   });
   store.settings.onField = s.onField;
   store.settings.quarterMin = s.quarterMin;
   store.game = {
     id: uid(), date: new Date().toISOString(), opponent: s.opponent.trim(),
     onField: s.onField, quarterSec: s.quarterMin * 60, quarter: 1, phase: 'lineup',
-    clock: { acc: 0, since: null }, qStart: 0, qOver: false, plan: null, nextSubAt: null,
+    clock: { acc: 0, since: null }, qStart: 0, qOver: false, plan: null, nextSubAt: null, fairT: 0,
   };
   G().players = players;
   view.draft = suggestLineup(G());
@@ -244,6 +256,7 @@ function makeGoalie(id) {
 function sideline(id, reason, replacementId) {
   const g = G(), t = now(g), p = g.players[id];
   pushUndo();
+  accrue(g, t);
   const wasGk = p.gk;
   move(p, 'out', t);
   p.reason = reason;
@@ -259,6 +272,7 @@ function sideline(id, reason, replacementId) {
 function returnPlayer(id) {
   const g = G(), t = now(g);
   pushUndo();
+  accrue(g, t);
   const p = g.players[id];
   move(p, 'bench', t); p.reason = null;
   if (g.phase === 'live') replan(g, t);
@@ -270,7 +284,8 @@ function addLate(rosterId, name) {
   let r = store.roster.find(x => x.id === rosterId);
   if (!r && name) { r = { id: uid(), name }; store.roster.push(r); }
   if (!r || g.players[r.id]) return;
-  g.players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null };
+  accrue(g, t);
+  g.players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0 };
   if (g.phase === 'live') replan(g, t);
   else view.draft = suggestLineup(g);
   view.sheet = null; save(); render();
@@ -279,10 +294,11 @@ function addLate(rosterId, name) {
 function finishGame() {
   const g = G(), t = now(g);
   Object.values(g.players).forEach(p => flush(p, t));
+  accrue(g, t);
   const h = {
     id: g.id, date: g.date, opponent: g.opponent, quarterMin: g.quarterSec / 60, onField: g.onField,
     quarters: g.quarter, gameSec: Math.round(t), synced: false,
-    players: Object.values(g.players).map(p => ({ name: p.name, played: Math.round(p.played), gkSec: Math.round(p.gkSec), gkQ: p.gkQ, stints: p.stints })),
+    players: Object.values(g.players).map(p => ({ name: p.name, played: Math.round(p.played), gkSec: Math.round(p.gkSec), gkQ: p.gkQ, stints: p.stints, fair: Math.round(p.fair || 0) })),
   };
   store.history.unshift(h);
   store.game = null;
@@ -309,6 +325,7 @@ function payload(h) {
     players: h.players.map(p => ({
       name: p.name, minutes: +(p.played / 60).toFixed(1), goalieMinutes: +(p.gkSec / 60).toFixed(1),
       goalieQuarters: p.gkQ, shifts: p.stints,
+      fairShareMinutes: p.fair == null ? '' : +(p.fair / 60).toFixed(1),
     })),
   };
 }
@@ -359,14 +376,17 @@ function chime(kind) {
   navigator.vibrate?.(kind === 'heads' ? 120 : [250, 100, 250, 100, 250]);
 }
 
+const noSleep = window.NoSleep ? new window.NoSleep() : null;
+const isAwake = () => !!noSleep?.isEnabled;
+// Must run inside a tap on iOS (the video fallback needs a user gesture).
 async function keepAwake(on) {
   try {
-    if (on && !wakeLock && 'wakeLock' in navigator) {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = null; });
-    } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+    if (on && !isAwake()) await noSleep?.enable();
+    else if (!on && isAwake()) noSleep.disable();
   } catch {}
 }
+// Any tap during a live game re-arms it (iOS drops it when the app is backgrounded).
+document.addEventListener('pointerdown', () => { if (G()?.phase === 'live' && !isAwake()) keepAwake(true); }, { passive: true });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (G()?.phase === 'live') keepAwake(true);
@@ -545,7 +565,7 @@ function planBlurb(p) {
 
 function renderLineup() {
   const g = G(), d = view.draft, t = now(g);
-  const ps = avail(g).sort((a, b) => played(a, t) - played(b, t));
+  const ps = avail(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
   const out = Object.values(g.players).filter(p => p.state === 'out');
   const need = Math.min(g.onField - 1, ps.length - 1);
   const ok = d.gk && d.field.size === need && !d.field.has(d.gk);
@@ -565,7 +585,7 @@ function renderLineup() {
         <button class="lu-main" data-act="lu-toggle" data-id="${p.id}">
           <span class="lu-state">${isGk ? 'GK' : on ? 'ON' : 'SUB'}</span>
           <span class="lu-name">${esc(p.name)}${p.gkQ ? `<small>${plural(p.gkQ, 'qtr')} in goal</small>` : ''}</span>
-          ${showTime ? `<span class="lu-time">${fmt(played(p, t))}</span>` : ''}
+          ${showTime ? `<span class="lu-time">${fmt(played(p, t))}<small>${fmtDelta(gap(g, p, t))}</small></span>` : ''}
         </button>
         <button class="glove ${isGk ? 'on' : ''}" data-act="lu-gk" data-id="${p.id}" aria-label="Make ${esc(p.name)} goalie" aria-pressed="${isGk}">${I.glove}</button>
       </li>`; }).join('')}</ul>
@@ -580,9 +600,9 @@ function renderLineup() {
 /* ---------- live ---------- */
 
 function renderLive() {
-  const g = G(), t = now(g), st = subStatus(g, t), avg = avgPlayed(g, t);
-  const field = onField(g).sort((a, b) => b.gk - a.gk || played(b, t) - played(a, t));
-  const bench = onBench(g).sort((a, b) => played(a, t) - played(b, t));
+  const g = G(), t = now(g), st = subStatus(g, t);
+  const field = onField(g).sort((a, b) => b.gk - a.gk || gap(g, b, t) - gap(g, a, t));
+  const bench = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
   const out = Object.values(g.players).filter(p => p.state === 'out');
   const pairs = g.plan?.k ? suggest(g, t, g.plan.k) : [];
   const last = g.quarter >= QUARTERS;
@@ -600,6 +620,7 @@ function renderLive() {
       <div class="clock-wrap">
         <div class="clock" data-clock>${fmt(t - g.qStart)}</div>
         <div class="clock-sub"><span data-left>${fmt(qEnd(g) - t)}</span> left in quarter</div>
+        <button class="awake ${isAwake() ? 'on' : ''}" data-act="awake" data-awake>${awakeLabel()}</button>
       </div>
       ${g.qOver ? '' : `<button class="play ${running(g) ? 'is-running' : 'is-paused'}" data-act="clock" aria-label="${running(g) ? 'Pause' : 'Start'} clock">${running(g) ? I.pause : I.play}</button>`}
     </div>
@@ -628,14 +649,14 @@ function renderLive() {
     </section>` : ''}
 
   <section class="pad stack-sm">
-    <div class="sec-h"><h2>On the field <span>${field.length}</span></h2><span class="legend">vs team avg</span></div>
-    <ul class="players">${field.map(p => playerRow(p, t, avg)).join('')}</ul>
+    <div class="sec-h"><h2>On the field <span>${field.length}</span></h2><span class="legend">vs fair share</span></div>
+    <ul class="players">${field.map(p => playerRow(p, t)).join('')}</ul>
     ${bench.length ? `
-    <div class="sec-h"><h2>Bench <span>${bench.length}</span></h2><span class="legend">fewest minutes first</span></div>
-    <ul class="players">${bench.map(p => playerRow(p, t, avg)).join('')}</ul>` : ''}
+    <div class="sec-h"><h2>Bench <span>${bench.length}</span></h2><span class="legend">most owed first</span></div>
+    <ul class="players">${bench.map(p => playerRow(p, t)).join('')}</ul>` : ''}
     ${out.length ? `
     <div class="sec-h"><h2>Sidelined <span>${out.length}</span></h2></div>
-    <ul class="players">${out.map(p => playerRow(p, t, avg)).join('')}</ul>` : ''}
+    <ul class="players">${out.map(p => playerRow(p, t)).join('')}</ul>` : ''}
     <p class="plan-note">${planBlurb(g.plan)}</p>
     ${g.qOver ? '' : `<button class="ghost" data-act="end-quarter">End Q${g.quarter} early</button>`}
   </section>`;
@@ -651,7 +672,7 @@ function subLine(g, t, st) {
 }
 const subProgress = (g, t) => Math.min(1, Math.max(0, 1 - (g.nextSubAt - t) / g.plan.T)).toFixed(4);
 
-function playerRow(p, t, avg) {
+function playerRow(p, t) {
   return `<li><button class="prow ${p.state}${p.gk ? ' gk' : ''}" data-act="player" data-id="${p.id}" data-pid="${p.id}">
     <span class="pr-name"><span>${p.gk ? `<i class="gk-tag">GK</i>` : ''}${esc(p.name)}</span><small data-meta>${metaText(p, t)}</small></span>
     <span class="meter"><i data-meter></i></span>
@@ -664,6 +685,8 @@ function metaText(p, t) {
   return `sitting ${fmt(stint(p, t))}`;
 }
 
+const awakeLabel = () => isAwake() ? 'Screen stays on' : 'Screen may sleep · tap to keep on';
+
 // Cheap per-tick updates (no re-render, so taps never land on a moving target).
 function updateLive(g, t) {
   const q = s => $app.querySelector(s);
@@ -671,11 +694,12 @@ function updateLive(g, t) {
   const l = q('[data-left]'); if (l) l.textContent = fmt(qEnd(g) - t);
   const st = subStatus(g, t);
   const n = q('[data-next]'); if (n && g.nextSubAt != null) n.textContent = st === 'due' ? '+' + fmt(t - g.nextSubAt) : fmt(g.nextSubAt - t);
+  const aw = q('[data-awake]');
+  if (aw && aw.classList.contains('on') !== isAwake()) { aw.classList.toggle('on', isAwake()); aw.textContent = awakeLabel(); }
   const b = q('[data-bar]'); if (b && g.nextSubAt != null) b.style.setProperty('--p', subProgress(g, t));
-  const avg = avgPlayed(g, t);
   $app.querySelectorAll('[data-pid]').forEach(el => {
     const p = g.players[el.dataset.pid]; if (!p) return;
-    const tot = played(p, t), d = tot - avg;
+    const tot = played(p, t), d = gap(g, p, t);
     el.querySelector('[data-tot]').textContent = fmt(tot);
     el.querySelector('[data-meta]').textContent = metaText(p, t);
     const del = el.querySelector('[data-delta]');
@@ -696,9 +720,10 @@ function renderSummary() {
   const h = store.history.find(x => x.id === view.summaryId);
   if (!h) return renderHome();
   const ps = [...h.players].sort((a, b) => b.played - a.played);
-  const max = Math.max(1, ...ps.map(p => p.played));
   const avg = ps.reduce((s, p) => s + p.played, 0) / ps.length;
-  const spread = ps.length ? ps[0].played - ps[ps.length - 1].played : 0;
+  const fairOf = p => p.fair ?? avg; // games saved before fair share existed
+  const max = Math.max(1, ...ps.map(p => Math.max(p.played, fairOf(p))));
+  const worst = Math.max(0, ...ps.map(p => Math.abs(p.played - fairOf(p))));
   const hasUrl = !!store.settings.sheetUrl;
   return `
   ${topbar('Final', 'home')}
@@ -709,14 +734,14 @@ function renderSummary() {
     </div>
     <div class="kpis">
       <div class="kpi"><b>${fmt(avg)}</b><span>Avg minutes</span></div>
-      <div class="kpi ${spread <= 120 ? 'good' : spread <= 240 ? 'meh' : 'bad'}"><b>${fmt(spread)}</b><span>Most − least</span></div>
+      <div class="kpi ${worst <= 90 ? 'good' : worst <= 180 ? 'meh' : 'bad'}"><b>${fmt(worst)}</b><span>Biggest gap from fair</span></div>
       <div class="kpi"><b>${ps.length}</b><span>Players</span></div>
     </div>
     <div class="card">
-      <div class="card-h"><h2>Minutes played</h2><span class="legend"><i class="avg-key"></i>team avg</span></div>
-      <ul class="bars" style="--avg:${(avg / max * 100).toFixed(2)}%">${ps.map(p => `
-        <li><span class="b-name">${esc(p.name)}${p.gkQ ? ` <i class="gk-tag">GK×${p.gkQ}</i>` : ''}</span>
-          <span class="b-track"><i style="width:${(p.played / max * 100).toFixed(2)}%"></i></span>
+      <div class="card-h"><h2>Minutes played</h2><span class="legend"><i class="avg-key"></i>fair share</span></div>
+      <ul class="bars">${ps.map(p => `
+        <li><span class="b-name">${esc(p.name)}${p.gkSec >= 30 ? ` <i class="gk-tag">GK ${Math.round(p.gkSec / 60)}m</i>` : ''}</span>
+          <span class="b-track" style="--avg:${(fairOf(p) / max * 100).toFixed(2)}%" title="Fair share ${fmt(fairOf(p))}"><i style="width:${(p.played / max * 100).toFixed(2)}%"></i></span>
           <span class="b-val">${fmt(p.played)}</span></li>`).join('')}</ul>
     </div>
     <div class="card sync ${h.synced ? 'ok' : ''}">
@@ -763,21 +788,21 @@ function renderSheet() {
   let body = '';
   if (s.type === 'player') {
     const p = g.players[s.id];
-    const avg = avgPlayed(g, t), d = played(p, t) - avg;
+    const d = gap(g, p, t);
     body = `
       <h2>${p.gk ? '<i class="gk-tag">GK</i>' : ''}${esc(p.name)}</h2>
       <div class="sheet-stats">
         <div><b>${fmt(played(p, t))}</b><span>played</span></div>
         <div><b>${p.state === 'out' ? '—' : fmt(stint(p, t))}</b><span>${p.state === 'field' ? 'this shift' : p.state === 'bench' ? 'on bench' : esc(p.reason || 'out')}</span></div>
-        <div><b>${fmtDelta(d)}</b><span>vs avg</span></div>
+        <div><b>${fmtDelta(d)}</b><span>vs fair share</span></div>
       </div>`;
     if (p.state === 'field') {
-      const cands = onBench(g).sort((a, b) => played(a, t) - played(b, t));
+      const cands = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
       body += cands.length ? `<h3>Take off, bring on…</h3><div class="pick">${cands.map((c, i) => `
         <button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="swap" data-off="${p.id}" data-on="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>` : '';
       if (!p.gk) body += `<button class="btn alt wide" data-act="make-gk" data-id="${p.id}">${I.glove} Put in goal</button>`;
     } else if (p.state === 'bench') {
-      const cands = onField(g).sort((a, b) => a.gk - b.gk || played(b, t) - played(a, t));
+      const cands = onField(g).sort((a, b) => a.gk - b.gk || gap(g, b, t) - gap(g, a, t));
       body += `<h3>Bring on, take off…</h3><div class="pick">${cands.map((c, i) => `
         <button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="swap" data-off="${c.id}" data-on="${p.id}">${c.gk ? 'GK · ' : ''}${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>`;
     }
@@ -786,7 +811,7 @@ function renderSheet() {
   }
   else if (s.type === 'replace') {
     const p = g.players[s.id];
-    const cands = onBench(g).sort((a, b) => played(a, t) - played(b, t));
+    const cands = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
     body = `<h2>Who replaces ${esc(p.name)}?</h2><p class="hint">${esc(s.reason)}${p.gk ? ' · they were in goal, so the replacement takes the gloves.' : ''}</p>
       <div class="pick">${cands.map((c, i) => `<button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="sideline-confirm" data-rep="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>
       ${p.gk ? '' : `<button class="btn alt wide" data-act="sideline-confirm" data-rep="">Nobody. Play a player short.</button>`}`;
@@ -853,6 +878,7 @@ const actions = {
   'start-quarter': startQuarter,
   clock: toggleClock,
   undo,
+  awake: () => keepAwake(true).then(() => G() && view.screen === 'live' && updateLive(G(), now())),
   menu: () => { view.sheet = { type: 'menu' }; view.confirm = null; renderSheet(); },
   sheet: d => { view.sheet = { type: d.type }; renderSheet(); },
   'close-sheet': () => { view.sheet = null; view.confirm = null; renderSheet(); },

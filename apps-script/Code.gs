@@ -7,7 +7,7 @@
  */
 const MINUTES_SHEET = 'Minutes';
 const TOTALS_SHEET = 'Season Totals';
-const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Quarter Length', 'On Field', 'Players Present', 'Received'];
+const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Quarter Length', 'On Field', 'Players Present', 'Received', 'Fair Share Minutes'];
 
 function doPost(e) {
   const lock = LockService.getScriptLock();
@@ -22,7 +22,7 @@ function doPost(e) {
     const received = new Date();
     const rows = data.players.map(p => [
       data.date, data.opponent, data.gameId, p.name, p.minutes, p.goalieMinutes, p.goalieQuarters, p.shifts,
-      data.quarterMin, data.onField, data.present, received,
+      data.quarterMin, data.onField, data.present, received, p.fairShareMinutes ?? '',
     ]);
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADER.length).setValues(rows);
     return json_({ ok: true, rows: rows.length });
@@ -38,6 +38,8 @@ function ensureSheets_() {
     sheet = ss.insertSheet(MINUTES_SHEET);
     sheet.getRange(1, 1, 1, HEADER.length).setValues([HEADER]).setFontWeight('bold');
     sheet.setFrozenRows(1);
+  } else if (sheet.getLastColumn() < HEADER.length) {
+    sheet.getRange(1, 1, 1, HEADER.length).setValues([HEADER]).setFontWeight('bold'); // added columns
   }
   if (!ss.getSheetByName(TOTALS_SHEET)) {
     const t = ss.insertSheet(TOTALS_SHEET);
