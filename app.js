@@ -16,6 +16,8 @@ const MIN_GAP = 150;     // don't ask the coach to sub more often than this (s)
 const HEADS_UP = 20;     // "get ready" warning before a sub window (s)
 const FRESH = 90;        // don't pull someone who just went on (s)
 const SIDELINE_REASONS = ['Injury', 'Bathroom', 'Other'];
+// Made-up names for trying the app; real rosters live only in the phone's storage.
+const DEMO_TEAM = ['Avery', 'Bea', 'Cruz', 'Dev', 'Emery', 'Finn', 'Gia', 'Hollis', 'Ines', 'Jules'];
 
 let store = load();
 let view = { screen: 'home', summaryId: null, draft: null, setup: null, sheet: null, confirm: null };
@@ -490,7 +492,8 @@ function renderRoster() {
       <li><span class="num">${i + 1}</span>
         <input value="${esc(r.name)}" data-rename="${r.id}" aria-label="Name">
         <button class="icon-btn" data-act="del-player" data-id="${r.id}" aria-label="Remove ${esc(r.name)}">${I.x}</button></li>`).join('')}</ul>`
-      : `<p class="empty">Type a name and hit Add, or paste your whole team below.</p>`}
+      : `<p class="empty">Type a name and hit Add, or paste your whole team below.</p>
+         <button class="ghost" data-act="demo-team">Just exploring? Load a demo team</button>`}
     <details class="card bulk">
       <summary>Paste a list of names</summary>
       <textarea id="bulk" rows="6" placeholder="One name per line"></textarea>
@@ -823,6 +826,7 @@ const actions = {
     names.forEach(name => { if (!store.roster.some(r => r.name.toLowerCase() === name.toLowerCase())) store.roster.push({ id: uid(), name }); });
     save(); render();
   },
+  'demo-team': () => { store.roster = DEMO_TEAM.map(name => ({ id: uid(), name })); save(); render(); },
   'toggle-present': d => { const s = view.setup.present; s.has(d.id) ? s.delete(d.id) : s.add(d.id); render(); },
   'present-all': () => { view.setup.present = new Set(store.roster.map(r => r.id)); render(); },
   'present-none': () => { view.setup.present = new Set(); render(); },

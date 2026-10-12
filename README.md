@@ -4,7 +4,7 @@ A sideline sub timer for youth soccer that keeps playing time fair. It's an offl
 
 ## What it does
 
-- **Roster once, attendance per game.** Add the team once (or paste a list), then tap who showed up.
+- **Roster once, attendance per game.** Add the team once (or paste a list), then tap who showed up. Names stay on your phone (and your own Google Sheet), never in this repo. Try it with **Load demo team** on the roster screen.
 - **Auto sub plan.** From the players present, field size, and quarter length, it picks how many to swap and how often. It aims for ~5-minute runs, keeps bench stints under ~4 minutes when the roster allows, and never asks for subs more often than every 2:30. Sub windows divide each quarter evenly.
 - **Sub cues.** A "get ready" chime 20 s before a window, then the scoreboard turns orange with "Sub now" and the exact swaps: most-played off, least-played on. It never pulls a kid who went on in the last 90 s.
 - **Fair-share meter.** Every player row shows minutes played and how far they are above or below the team average.
