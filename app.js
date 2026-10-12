@@ -152,10 +152,15 @@ function suggest(g, t, k) {
   return Array.from({ length: n }, (_, i) => [out[i], inn[i]]);
 }
 
+const byArrival = (a, b) => (a.arrived ?? 0) - (b.arrived ?? 0);
 function suggestLineup(g) {
   const t = now(g);
   const ps = avail(g);
-  const byGap = (a, b) => gap(g, a, t) - gap(g, b, t);
+  const byGap = (a, b) => gap(g, a, t) - gap(g, b, t) || byArrival(a, b);
+  if (g.quarter === 1) {
+    // First lineup: the first kids to arrive start; the coach picks the goalie.
+    return { gk: null, field: new Set(ps.sort(byArrival).slice(0, g.onField).map(p => p.id)) };
+  }
   const gk = [...ps].sort((a, b) => a.gkQ - b.gkQ || byGap(a, b))[0];
   const field = ps.filter(p => p !== gk).sort(byGap).slice(0, g.onField - 1).map(p => p.id);
   return { gk: gk?.id ?? null, field: new Set(field) };
@@ -181,8 +186,8 @@ function createGame() {
   const s = view.setup;
   const t = 0;
   const players = {};
-  store.roster.filter(r => s.present.has(r.id)).forEach(r => {
-    players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0 };
+  [...s.present].map(id => store.roster.find(r => r.id === id)).filter(Boolean).forEach((r, i) => {
+    players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0, arrived: i + 1 };
   });
   store.settings.onField = s.onField;
   store.settings.quarterMin = s.quarterMin;
@@ -304,7 +309,7 @@ function addLate(rosterId, name) {
   if (!r && name) { r = { id: uid(), name }; store.roster.push(r); }
   if (!r || g.players[r.id]) return;
   accrue(g, t);
-  g.players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0 };
+  g.players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0, arrived: Object.keys(g.players).length + 1 };
   if (g.phase === 'live') replan(g, t);
   else view.draft = suggestLineup(g);
   view.sheet = null; save(); render();
@@ -551,9 +556,9 @@ function renderSetup() {
   ${topbar('Game day', 'home')}
   <section class="stack pad">
     <div class="card">
-      <div class="card-h"><h2>Who's here?</h2><span class="count-big">${n}<small>/${store.roster.length}</small></span></div>
+      <div class="card-h"><h2>Who's here?</h2><span class="legend">tap in arrival order</span><span class="count-big">${n}<small>/${store.roster.length}</small></span></div>
       <div class="toggles">${store.roster.map(r => `
-        <button class="tog ${s.present.has(r.id) ? 'on' : ''}" data-act="toggle-present" data-id="${r.id}" aria-pressed="${s.present.has(r.id)}">${esc(r.name)}</button>`).join('')}
+        <button class="tog ${s.present.has(r.id) ? 'on' : ''}" data-act="toggle-present" data-id="${r.id}" aria-pressed="${s.present.has(r.id)}">${s.present.has(r.id) ? `<i class="order">${[...s.present].indexOf(r.id) + 1}</i>` : ''}${esc(r.name)}</button>`).join('')}
       </div>
       <div class="row-btns"><button class="link" data-act="present-all">All</button><button class="link" data-act="present-none">None</button></div>
     </div>
@@ -584,26 +589,28 @@ function planBlurb(p) {
 
 function renderLineup() {
   const g = G(), d = view.draft, t = now(g);
-  const ps = avail(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
+  const first = g.quarter === 1;
+  const ps = avail(g).sort(first ? byArrival : (a, b) => gap(g, a, t) - gap(g, b, t) || byArrival(a, b));
   const out = Object.values(g.players).filter(p => p.state === 'out');
-  const need = Math.min(g.onField - 1, ps.length - 1);
-  const ok = d.gk && d.field.size === need && !d.field.has(d.gk);
-  const showTime = g.quarter > 1;
+  const need = Math.min(g.onField, ps.length);
+  const starters = d.field.size + (d.gk && !d.field.has(d.gk) ? 1 : 0);
+  const ok = d.gk && starters === need && !d.field.has(d.gk);
+  const showTime = !first;
   return `
   ${topbar(`Q${g.quarter} lineup`, 'home', `<button class="icon-btn" data-act="menu" aria-label="Game menu">${I.more}</button>`)}
   <section class="stack pad">
     <div class="lineup-count">
       <div class="lc ${d.gk ? 'done' : ''}"><span>${d.gk ? 1 : 0}<small>/1</small></span>Goalie</div>
-      <div class="lc ${d.field.size === need ? 'done' : d.field.size > need ? 'over' : ''}"><span>${d.field.size}<small>/${need}</small></span>On field</div>
-      <div class="lc"><span>${ps.length - d.field.size - (d.gk ? 1 : 0)}</span>Bench</div>
+      <div class="lc ${starters === need ? 'done' : starters > need ? 'over' : ''}"><span>${starters}<small>/${need}</small></span>Starting</div>
+      <div class="lc"><span>${ps.length - starters}</span>Bench</div>
     </div>
-    <p class="hint">Suggested lineup puts the fewest minutes on first. Tap a player to switch them between field and bench. Tap a glove to choose the goalie.</p>
+    <p class="hint">${first ? `Suggested: the first ${need} to arrive start. Tap a glove to choose your goalie.` : 'Suggested: the kids most owed minutes start.'} Tap a player to switch them between field and bench.</p>
     <ul class="lineup">${ps.map(p => {
       const isGk = d.gk === p.id, on = d.field.has(p.id);
       return `<li class="${isGk ? 'is-gk' : on ? 'is-on' : 'is-bench'}">
         <button class="lu-main" data-act="lu-toggle" data-id="${p.id}">
           <span class="lu-state">${isGk ? 'GK' : on ? 'ON' : 'SUB'}</span>
-          <span class="lu-name">${esc(p.name)}${p.gkQ ? `<small>${plural(p.gkQ, 'qtr')} in goal</small>` : ''}</span>
+          <span class="lu-name">${esc(p.name)}${first && p.arrived ? `<small>Arrived #${p.arrived}</small>` : p.gkQ ? `<small>${plural(p.gkQ, 'qtr')} in goal</small>` : ''}</span>
           ${showTime ? `<span class="lu-time">${fmt(played(p, t))}<small>${fmtDelta(gap(g, p, t))}</small></span>` : ''}
         </button>
         <button class="glove ${isGk ? 'on' : ''}" data-act="lu-gk" data-id="${p.id}" aria-label="Make ${esc(p.name)} goalie" aria-pressed="${isGk}">${I.glove}</button>
@@ -611,7 +618,7 @@ function renderLineup() {
     ${out.length ? `<div class="card"><div class="card-h"><h2>Sidelined</h2></div>${out.map(p => `
       <div class="out-row"><span>${esc(p.name)} <small>${esc(p.reason || '')}</small></span><button class="link" data-act="return" data-id="${p.id}">Back in</button></div>`).join('')}</div>` : ''}
     <button class="cta" data-act="start-quarter" ${ok ? '' : 'disabled'}>
-      <span class="cta-k">${ok ? 'Clock starts paused. Tap play on the whistle.' : !d.gk ? 'Choose a goalie' : `Pick ${need} field players`}</span>
+      <span class="cta-k">${ok ? 'Clock starts paused. Tap play on the whistle.' : !d.gk ? 'Tap a glove to choose a goalie' : `Pick ${need} starters, goalie included`}</span>
       <span class="cta-t">Lock in Q${g.quarter}</span></button>
   </section>`;
 }

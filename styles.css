@@ -191,7 +191,7 @@ input:focus, textarea:focus { border-color: var(--pitch); }
 
 /* ---------- setup ---------- */
 
-.count-big { font: 900 34px/1 var(--display); }
+.count-big { font: 900 34px/1 var(--display); margin-left: auto; }
 .count-big small { font-size: 20px; color: var(--muted); }
 .toggles { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .tog {
@@ -200,7 +200,7 @@ input:focus, textarea:focus { border-color: var(--pitch); }
   position: relative; transition: background .15s, color .15s;
 }
 .tog.on { background: var(--pitch); color: var(--chalk); box-shadow: none; }
-.tog.on::after { content: ''; position: absolute; right: 12px; top: 50%; width: 6px; height: 12px; border: solid var(--lime); border-width: 0 3px 3px 0; transform: translateY(-65%) rotate(45deg); }
+.tog .order { font: 900 18px/1 var(--display); font-style: normal; color: var(--lime); margin-right: 8px; display: inline-block; min-width: 14px; }
 .stepper { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
 .stepper + .stepper { border-top: 1px solid var(--rule); padding-top: 12px; margin-top: 6px; }
 .stepper label { font-weight: 700; display: grid; }
