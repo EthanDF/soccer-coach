@@ -12,6 +12,19 @@ TITLE="${TITLE:-Assistant Coach Season Log}"
 
 command -v clasp >/dev/null || { echo "Install clasp first: npm i -g @google/clasp && clasp login"; exit 1; }
 
+# clasp can exit 0 even when Google rejects the call, so check what it printed.
+run_clasp() {
+  local out code=0
+  out=$(clasp "$@" 2>&1) || code=$?
+  if [ $code -ne 0 ] || grep -qiE 'invalid_grant|"error"|^error' <<<"$out"; then
+    echo "$out" >&2
+    if grep -q invalid_grant <<<"$out"; then echo "✗ clasp's Google login expired. Run  clasp login  and then re-run this script." >&2
+    else echo "✗ clasp $1 failed." >&2; fi
+    exit 1
+  fi
+  printf '%s\n' "$out"
+}
+
 if [ ! -f apps-script/Secret.gs ]; then
   printf "// Shared secret the app sends as ?key=… — keep out of git.\nconst SYNC_KEY = '%s';\n" "$(openssl rand -hex 12)" > apps-script/Secret.gs
   echo "✓ Made a new sync key"
@@ -20,19 +33,19 @@ KEY=$(sed -n "s/.*SYNC_KEY = '\(.*\)'.*/\1/p" apps-script/Secret.gs)
 
 if [ ! -f .clasp.json ]; then
   cp apps-script/appsscript.json /tmp/ac-manifest.json   # clasp create overwrites the manifest
-  clasp create-script --type sheets --title "$TITLE" --rootDir apps-script
+  run_clasp create-script --type sheets --title "$TITLE" --rootDir apps-script
   cp /tmp/ac-manifest.json apps-script/appsscript.json
   echo "✓ Created the sheet \"$TITLE\" in your Google Drive"
 fi
 
-clasp push --force >/dev/null && echo "✓ Pushed the script"
+run_clasp push --force >/dev/null && echo "✓ Pushed the script"
 
 DEPLOY_FILE=apps-script/.deployment-id
 if [ -f "$DEPLOY_FILE" ]; then
   DEP=$(cat "$DEPLOY_FILE")
-  clasp create-deployment --deploymentId "$DEP" --description "update $(date +%F)" >/dev/null
+  run_clasp create-deployment --deploymentId "$DEP" --description "update $(date +%F)" >/dev/null
 else
-  DEP=$(clasp create-deployment --description "v1" | sed -n 's/^Deployed \([^ ]*\).*/\1/p')
+  DEP=$(run_clasp create-deployment --description "v1" | sed -n 's/^Deployed \([^ ]*\).*/\1/p')
   echo "$DEP" > "$DEPLOY_FILE"
 fi
 echo "✓ Web app deployed"

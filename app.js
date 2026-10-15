@@ -34,7 +34,13 @@ function load() {
   } catch {}
   return fresh;
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(store)); } catch {} }
+function save() {
+  keeperGuard(store.game);
+  try { localStorage.setItem(KEY, JSON.stringify(store)); } catch {}
+}
+// Roster edits are backed up to the Google Sheet, so a wiped phone or a new
+// home-screen install can get the team back.
+function rosterChanged() { store.rosterDirty = true; save(); syncAll(); }
 
 /* ---------- utils ---------- */
 
@@ -80,6 +86,18 @@ function move(p, state, t) {
   }
   p.bank = t;
   if (state !== 'field') p.gk = false;
+}
+// One goalie, ever. g.keeper is the single source of truth; p.gk mirrors it.
+function setGoalie(g, id, t) {
+  onField(g).forEach(p => flush(p, t)); // bank goalie minutes up to now
+  g.keeper = id || null;
+  keeperGuard(g);
+}
+function keeperGuard(g) {
+  if (!g?.players) return;
+  if (g.keeper === undefined) g.keeper = onField(g).find(p => p.gk)?.id ?? null; // games saved before g.keeper
+  if (g.players[g.keeper]?.state !== 'field') g.keeper = null;
+  Object.values(g.players).forEach(p => { p.gk = p.id === g.keeper; });
 }
 const short = g => g.phase === 'live' && onField(g).length < g.onField;
 const avail = g => Object.values(g.players).filter(p => p.state !== 'out');
@@ -170,7 +188,7 @@ function suggestLineup(g) {
 
 function pushUndo() {
   const g = G();
-  undoStack.push(JSON.stringify({ players: g.players, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
+  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
   if (undoStack.length > 20) undoStack.shift();
 }
 function undo() {
@@ -205,8 +223,8 @@ function startQuarter() {
   const g = G(), d = view.draft, t = now(g);
   accrue(g, t);
   avail(g).forEach(p => move(p, p.id === d.gk || d.field.has(p.id) ? 'field' : 'bench', t));
-  const gk = g.players[d.gk];
-  gk.gk = true; gk.gkQ++;
+  setGoalie(g, d.gk, t);
+  g.players[d.gk].gkQ++;
   g.phase = 'live'; g.qOver = false;
   replan(g, t);
   undoStack = [];
@@ -245,10 +263,10 @@ function doSubs(pairs, planned = false) {
   view.sheet = null; save(); render();
 }
 function swap(off, on, t) {
-  const wasGk = off.gk;
+  const g = G(), wasGk = off.gk;
   move(off, 'bench', t);
   move(on, 'field', t);
-  on.gk = wasGk;
+  if (wasGk) setGoalie(g, on.id, t);
 }
 function skipWindow() {
   const g = G();
@@ -260,8 +278,7 @@ function skipWindow() {
 function makeGoalie(id) {
   const g = G(), t = now(g);
   pushUndo();
-  onField(g).forEach(p => { flush(p, t); p.gk = false; });
-  g.players[id].gk = true;
+  setGoalie(g, id, t);
   view.sheet = null; save(); render();
 }
 
@@ -275,7 +292,7 @@ function sideline(id, reason, replacementId) {
   if (replacementId) {
     const r = g.players[replacementId];
     move(r, 'field', t);
-    if (wasGk) { flush(r, t); r.gk = true; }
+    if (wasGk) setGoalie(g, r.id, t);
   }
   replan(g, t);
   view.sheet = null; save(); render();
@@ -288,7 +305,7 @@ function fillSpot(id) {
   accrue(g, t);
   const wasOut = p.state === 'out';
   move(p, 'field', t); p.reason = null;
-  if (!onField(g).some(x => x.gk)) p.gk = true; // empty net gets filled first
+  if (!onField(g).some(x => x.gk)) setGoalie(g, p.id, t); // empty net gets filled first
   if (wasOut) replan(g, t);
   view.sheet = null; save(); render();
 }
@@ -306,7 +323,7 @@ function returnPlayer(id) {
 function addLate(rosterId, name) {
   const g = G(), t = now(g);
   let r = store.roster.find(x => x.id === rosterId);
-  if (!r && name) { r = { id: uid(), name }; store.roster.push(r); }
+  if (!r && name) { r = { id: uid(), name }; store.roster.push(r); store.rosterDirty = true; }
   if (!r || g.players[r.id]) return;
   accrue(g, t);
   g.players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0, arrived: Object.keys(g.players).length + 1 };
@@ -358,6 +375,12 @@ async function syncAll() {
   const url = store.settings.sheetUrl;
   if (!url || syncing || !navigator.onLine) return;
   syncing = true;
+  if (store.rosterDirty) {
+    try {
+      await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ type: 'roster', names: store.roster.map(r => r.name) }) });
+      store.rosterDirty = false; save();
+    } catch {}
+  }
   for (const h of store.history.filter(h => !h.synced)) {
     try {
       // Apps Script can't answer CORS preflights, so send a "simple" request and trust delivery.
@@ -537,6 +560,7 @@ function renderRoster() {
         <input value="${esc(r.name)}" data-rename="${r.id}" aria-label="Name">
         <button class="icon-btn" data-act="del-player" data-id="${r.id}" aria-label="Remove ${esc(r.name)}">${I.x}</button></li>`).join('')}</ul>`
       : `<p class="empty">Type a name and hit Add, or paste your whole team below.</p>
+         ${store.settings.sheetUrl ? `<button class="btn alt wide" data-act="restore-roster">Restore team from Google Sheet</button>` : ''}
          <button class="ghost" data-act="demo-team">Just exploring? Load a demo team</button>`}
     <details class="card bulk">
       <summary>Paste a list of names</summary>
@@ -794,7 +818,7 @@ function connText() {
   const name = conn.name || store.settings.sheetName;
   return { idle: name ? `Linked to <b>${esc(name)}</b>.` : 'Linked. Tap Test connection to check it.',
     testing: 'Checking…',
-    ok: `Connected to <b>${esc(conn.name)}</b>.`,
+    ok: `Connected to <b>${esc(conn.name)}</b>.${conn.restored ? ` Restored ${conn.restored} players from it.` : ''}`,
     bad: esc(conn.msg || 'Could not reach the sheet.') }[conn.state];
 }
 async function testSheet() {
@@ -804,7 +828,14 @@ async function testSheet() {
   try {
     const r = await fetch(url, { redirect: 'follow' });
     const j = await r.json().catch(() => null);
-    if (j?.ok) { conn = { state: 'ok', name: j.name }; store.settings.sheetName = j.name; save(); }
+    if (j?.ok) {
+      conn = { state: 'ok', name: j.name }; store.settings.sheetName = j.name;
+      if (!store.roster.length && j.roster?.length) { store.roster = j.roster.map(name => ({ id: uid(), name })); conn.restored = j.roster.length; }
+      // The sheet's backup is missing or stale: send it again.
+      else if (store.roster.length && JSON.stringify(j.roster) !== JSON.stringify(store.roster.map(r => r.name))) { store.rosterDirty = true; setTimeout(syncAll); }
+      save();
+      if (conn.restored && ['home', 'roster'].includes(view.screen)) render();
+    }
     else if (j?.error === 'bad key') conn = { state: 'bad', msg: 'The sheet rejected this link (wrong key). Make a fresh connect link.' };
     else conn = { state: 'bad', msg: 'The sheet script isn\'t answering. It may need its one-time authorization: open the script, run "setup", and approve.' };
   } catch {
@@ -929,13 +960,14 @@ const actions = {
   resume: () => go(G().phase === 'lineup' ? 'lineup' : 'live'),
   'new-game': () => go('setup'),
   'view-game': d => { view.summaryId = d.id; go('summary'); },
-  'del-player': d => { store.roster = store.roster.filter(r => r.id !== d.id); save(); render(); },
+  'del-player': d => { store.roster = store.roster.filter(r => r.id !== d.id); rosterChanged(); render(); },
   'bulk-add': () => {
     const names = document.getElementById('bulk').value.split(/\n|,/).map(s => s.trim()).filter(Boolean);
     names.forEach(name => { if (!store.roster.some(r => r.name.toLowerCase() === name.toLowerCase())) store.roster.push({ id: uid(), name }); });
-    save(); render();
+    rosterChanged(); render();
   },
-  'demo-team': () => { store.roster = DEMO_TEAM.map(name => ({ id: uid(), name })); save(); render(); },
+  'demo-team': () => { store.roster = DEMO_TEAM.map(name => ({ id: uid(), name })); save(); render(); }, // demo stays off the sheet
+  'restore-roster': testSheet,
   'toggle-present': d => { const s = view.setup.present; s.has(d.id) ? s.delete(d.id) : s.add(d.id); render(); },
   'present-all': () => { view.setup.present = new Set(store.roster.map(r => r.id)); render(); },
   'present-none': () => { view.setup.present = new Set(); render(); },
@@ -1018,7 +1050,7 @@ document.addEventListener('submit', e => {
   if (!name) return;
   if (form.dataset.form === 'add-player') {
     if (!store.roster.some(r => r.name.toLowerCase() === name.toLowerCase())) store.roster.push({ id: uid(), name });
-    save(); render();
+    rosterChanged(); render();
     document.getElementById('add-name')?.focus();
   } else if (form.dataset.form === 'add-late') addLate(null, name);
 });
@@ -1027,7 +1059,7 @@ document.addEventListener('change', e => {
   const id = e.target.dataset.rename;
   if (id) {
     const r = store.roster.find(x => x.id === id), v = e.target.value.trim();
-    if (r && v) { r.name = v; save(); }
+    if (r && v) { r.name = v; rosterChanged(); }
   }
 });
 document.addEventListener('input', e => {
@@ -1037,6 +1069,7 @@ document.addEventListener('input', e => {
 /* ---------- boot ---------- */
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+if (store.game) save(); // save() enforces one goalie; repairs games saved before the one-goalie rule
 const linked = connectFromLink();
 if (G()) {
   view.screen = G().phase === 'lineup' ? 'lineup' : 'live';
@@ -1045,5 +1078,6 @@ if (G()) {
 }
 else if (linked) view.screen = 'settings';
 render();
-if (linked) testSheet();
+if (store.settings.sheetUrl && navigator.onLine) testSheet(); // checks the link; restores a lost roster or refreshes its backup
+navigator.storage?.persist?.().catch(() => {}); // ask the browser not to evict our data
 syncAll();

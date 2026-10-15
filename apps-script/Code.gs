@@ -8,13 +8,16 @@
  */
 const MINUTES_SHEET = 'Minutes';
 const TOTALS_SHEET = 'Season Totals';
+const ROSTER_SHEET = 'Roster'; // backup of the app's team list
 const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Quarter Length', 'On Field', 'Players Present', 'Received', 'Fair Share Minutes'];
 
 // Connection test from the app's Settings: confirms the key and names the sheet.
 function doGet(e) {
   if (typeof SYNC_KEY !== 'undefined' && e.parameter.key !== SYNC_KEY) return json_({ ok: false, error: 'bad key' });
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  return json_({ ok: true, name: ss.getName() });
+  const r = ss.getSheetByName(ROSTER_SHEET);
+  const roster = r && r.getLastRow() > 1 ? r.getRange(2, 1, r.getLastRow() - 1, 1).getValues().flat().filter(String) : [];
+  return json_({ ok: true, name: ss.getName(), roster });
 }
 
 function doPost(e) {
@@ -23,6 +26,7 @@ function doPost(e) {
   try {
     if (typeof SYNC_KEY !== 'undefined' && e.parameter.key !== SYNC_KEY) return json_({ ok: false, error: 'bad key' });
     const data = JSON.parse(e.postData.contents);
+    if (data.type === 'roster') return json_(saveRoster_(data.names || []));
     const sheet = ensureSheets_();
     // Each game is stored once, even if the phone retries.
     const ids = sheet.getLastRow() > 1 ? sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getValues().flat() : [];
@@ -57,6 +61,16 @@ function ensureSheets_() {
     );
   }
   return sheet;
+}
+
+function saveRoster_(names) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const r = ss.getSheetByName(ROSTER_SHEET) || ss.insertSheet(ROSTER_SHEET);
+  r.clearContents();
+  r.getRange(1, 1, names.length + 1, 1).setValues([['Player'], ...names.map(n => [String(n)])]);
+  r.getRange(1, 1).setFontWeight('bold');
+  r.setFrozenRows(1);
+  return { ok: true, roster: names.length };
 }
 
 function json_(o) {
