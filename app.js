@@ -395,31 +395,53 @@ window.addEventListener('online', syncAll);
 
 /* ---------- sound, vibration, wake lock ---------- */
 
-let actx;
-function audio() {
-  try {
-    if (!actx) {
-      actx = new (window.AudioContext || window.webkitAudioContext)();
-      if (navigator.audioSession) navigator.audioSession.type = 'playback'; // play even with iOS silent switch
+/* Chimes are rendered once to WAV files and played through <audio> elements.
+   iOS plays media elements even with the silent switch on, and keeps playing
+   them after the screen dims; Web Audio is muted by the switch and gets cut off
+   when the page is backgrounded. Each element is unlocked by the first tap, so it
+   can later play on its own when the timer fires. */
+const CHIMES = {
+  // [frequency, start s, length s]: two bright phrases for "sub now", so it carries across a field
+  due: [[880, 0, .14], [1175, .16, .14], [1568, .32, .28], [880, .75, .14], [1175, .91, .14], [1568, 1.07, .34]],
+  heads: [[740, 0, .16], [988, .2, .26]],
+  end: [[660, 0, .3], [660, .4, .3], [440, .8, .6]],
+};
+function wavUrl(notes) {
+  const rate = 22050, len = Math.ceil(rate * Math.max(...notes.map(([, at, d]) => at + d + .05)));
+  const pcm = new Float32Array(len);
+  for (const [f, at, d] of notes) {
+    const s0 = Math.floor(at * rate), n = Math.floor(d * rate);
+    for (let i = 0; i < n; i++) {
+      const x = i / rate, env = Math.min(1, x / .005) * Math.exp(-3 * x / d);
+      const w = Math.sin(2 * Math.PI * f * x), sq = Math.sign(w) * .6 + w * .4; // square-ish: loud on tiny speakers
+      pcm[s0 + i] += sq * env * .9;
     }
-    if (actx.state === 'suspended') actx.resume();
-  } catch {}
-  return actx;
+  }
+  const buf = new DataView(new ArrayBuffer(44 + len * 2));
+  const str = (o, t) => [...t].forEach((c, i) => buf.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); buf.setUint32(4, 36 + len * 2, true); str(8, 'WAVEfmt ');
+  buf.setUint32(16, 16, true); buf.setUint16(20, 1, true); buf.setUint16(22, 1, true);
+  buf.setUint32(24, rate, true); buf.setUint32(28, rate * 2, true); buf.setUint16(32, 2, true); buf.setUint16(34, 16, true);
+  str(36, 'data'); buf.setUint32(40, len * 2, true);
+  pcm.forEach((v, i) => buf.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true));
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
-document.addEventListener('pointerdown', audio, { passive: true });
+const players_ = {};
+function unlockAudio() {
+  if (navigator.audioSession) try { navigator.audioSession.type = 'playback'; } catch {}
+  for (const k in CHIMES) {
+    if (players_[k]) continue;
+    const el = players_[k] = new Audio(wavUrl(CHIMES[k]));
+    el.preload = 'auto'; el.muted = true; el.priming = true;
+    el.play().then(() => { if (el.priming) { el.pause(); el.currentTime = 0; } el.priming = false; el.muted = false; })
+      .catch(() => { delete players_[k]; });
+  }
+}
+document.addEventListener('pointerdown', unlockAudio, { passive: true });
 
 function chime(kind) {
-  const a = audio();
-  const seq = { due: [[880, 0], [1175, .16], [880, .32], [1175, .48], [1568, .64]], heads: [[740, 0], [988, .18]], end: [[660, 0], [660, .35], [440, .7]] }[kind];
-  if (a) seq.forEach(([f, at]) => {
-    const o = a.createOscillator(), v = a.createGain(), s = a.currentTime + at;
-    o.type = 'square'; o.frequency.value = f;
-    v.gain.setValueAtTime(0.0001, s);
-    v.gain.exponentialRampToValueAtTime(0.25, s + 0.01);
-    v.gain.exponentialRampToValueAtTime(0.0001, s + (kind === 'end' ? 0.3 : 0.14));
-    o.connect(v).connect(a.destination);
-    o.start(s); o.stop(s + 0.35);
-  });
+  const el = players_[kind];
+  if (el) { el.priming = false; el.muted = false; el.currentTime = 0; el.play().catch(() => {}); }
   navigator.vibrate?.(kind === 'heads' ? 120 : [250, 100, 250, 100, 250]);
 }
 
@@ -877,6 +899,11 @@ function renderSettings() {
         <div class="row-btns"><button class="btn" data-act="save-url">Connect</button></div>`}
     </div>
     <div class="card">
+      <div class="card-h"><h2>Sound</h2></div>
+      <p class="hint">A two-note chime 20 seconds before a sub, a longer chime when it's time, and a low chime at the end of a quarter. It plays even with the silent switch on. Turn the volume up.</p>
+      <div class="row-btns"><button class="btn alt" data-act="test-sound">Test sound</button></div>
+    </div>
+    <div class="card">
       <div class="card-h"><h2>How subs are planned</h2></div>
       <p class="hint">The app aims for shifts of about ${fmt(TARGET_RUN)}, keeps bench time under about ${fmt(MAX_REST)} when the roster allows, and won't ask you to sub more often than every ${fmt(MIN_GAP)}. Sub windows divide each quarter evenly. Quarter breaks are always a sub point. Goalies stay in for the full quarter, and goalie time counts as playing time.</p>
     </div>
@@ -936,6 +963,7 @@ function renderSheet() {
     body = `<h2>Game</h2><div class="menu">
       <button data-act="sheet" data-type="late">Add a late arrival</button>
       ${inLive && !g.qOver ? `<button data-act="end-quarter">End Q${g.quarter} now</button>` : ''}
+      <button data-act="test-sound">Test sound (turn the volume up)</button>
       <button data-act="finish">Finish game & save</button>
       <button class="danger" data-act="discard">${view.confirm === 'discard' ? 'Tap again to discard without saving' : 'Discard game'}</button>
     </div>`;
@@ -1004,6 +1032,7 @@ const actions = {
   'toggle-pair': d => { view.keep.has(d.id) ? view.keep.delete(d.id) : view.keep.add(d.id); render(); },
   skip: skipWindow,
   'make-gk': d => makeGoalie(d.id),
+  'test-sound': () => chime('due'),
   fill: d => fillSpot(d.id),
   sideline: d => {
     const g = G(), p = g.players[d.id];

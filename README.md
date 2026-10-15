@@ -27,7 +27,7 @@ Host it anywhere with HTTPS (GitHub Pages, Vercel, Netlify). Open it in Safari, 
 > **Game-day iPhone tips.** Web apps can't alert you while the phone is locked, so keep the app on screen.
 > - **Turn off Low Power Mode.** It forces Auto-Lock to 30 seconds.
 > - **Guided Access** (Settings → Accessibility → Guided Access, set *Display Auto-Lock: Never*) pins the phone to the app. Triple-click the side button to start or stop it. It also blocks pocket taps and kids swiping away.
-> - Turn the volume up for the chimes. They play even with the silent switch on (iOS 17+).
+> - Turn the volume up for the chimes. They play even with the silent switch on. Check with **Settings → Test sound** (or Test sound in the in-game menu).
 
 ## Google Sheet sync
 
