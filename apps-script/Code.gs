@@ -9,7 +9,7 @@
 const MINUTES_SHEET = 'Minutes';
 const TOTALS_SHEET = 'Season Totals';
 const ROSTER_SHEET = 'Roster'; // backup of the app's team list
-const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Quarter Length', 'On Field', 'Players Present', 'Received', 'Fair Share Minutes'];
+const HEADER = ['Date', 'Opponent', 'Game ID', 'Player', 'Minutes', 'Goalie Minutes', 'Goalie Quarters', 'Shifts', 'Period Length', 'On Field', 'Players Present', 'Received', 'Fair Share Minutes', 'Periods'];
 
 // Connection test from the app's Settings: confirms the key and names the sheet.
 function doGet(e) {
@@ -34,7 +34,7 @@ function doPost(e) {
     const received = new Date();
     const rows = data.players.map(p => [
       data.date, data.opponent, data.gameId, p.name, p.minutes, p.goalieMinutes, p.goalieQuarters, p.shifts,
-      data.quarterMin, data.onField, data.present, received, p.fairShareMinutes ?? '',
+      data.quarterMin, data.onField, data.present, received, p.fairShareMinutes ?? '', data.periods ?? 4,
     ]);
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADER.length).setValues(rows);
     return json_({ ok: true, rows: rows.length });

@@ -27,9 +27,11 @@ const alerted = { heads: null, due: null };
 /* ---------- persistence ---------- */
 
 function load() {
-  const fresh = { roster: [], settings: { onField: 6, quarterMin: 10, sheetUrl: '' }, game: null, history: [] };
+  // quarterMin is the length of one period (half or quarter); the name predates halves.
+  const fresh = { roster: [], settings: { onField: 6, periods: 2, quarterMin: 20, waterBreak: true, sheetUrl: '' }, game: null, history: [] };
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
+    if (s && s.settings && s.settings.periods == null) Object.assign(s.settings, { periods: 2, quarterMin: 20, waterBreak: true });
     if (s) return { ...fresh, ...s, settings: { ...fresh.settings, ...s.settings } };
   } catch {}
   return fresh;
@@ -57,6 +59,15 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 /* ---------- game clock & player time ---------- */
 
 const qEnd = g => g.qStart + g.quarterSec;
+// Halves or quarters. Games saved before halves existed are quarters.
+const periods = g => g.periods ?? QUARTERS;
+const halves = g => periods(g) === 2;
+const pWord = g => halves(g) ? 'half' : 'quarter';
+const pTag = (g, n = g.quarter) => (halves(g) ? 'H' : 'Q') + n;
+const pName = (g, n = g.quarter) => halves(g) ? (n === 1 ? '1st half' : '2nd half') : 'Q' + n;
+const formatText = s => `${s.periods === 2 ? `2 × ${s.quarterMin}-min halves` : `4 × ${s.quarterMin}-min quarters`}${s.periods === 2 && s.waterBreak ? ' · water break' : ''}`;
+// The water break is halfway through a period; the clock keeps running through it.
+const isBreak = (g, at) => g.breakAt != null && at != null && Math.abs(at - g.qStart - g.breakAt) < 1;
 function now(g = G()) {
   let t = g.clock.acc;
   if (g.clock.since) t += (Date.now() - g.clock.since) / 1000;
@@ -125,7 +136,8 @@ const gap = (g, p, t) => played(p, t) - fair(g, p, t);
    S skaters on the field, B extra skaters on the bench.
    Each shift: on for Lon, off for Lon*B/S. Swap k players every T seconds,
    where T = k*Lon/S. Pick the smallest k that keeps T >= MIN_GAP, then
-   snap T so sub windows divide the quarter evenly. */
+   snap T so sub windows divide the period evenly. With a water break, they
+   divide each half of the period, so the break is always a sub window. */
 
 function computePlan(g) {
   const S = g.onField - 1;
@@ -136,9 +148,10 @@ function computePlan(g) {
   let k = 1, T = Lon / S;
   while (T < MIN_GAP && k < B) { k++; T = k * Lon / S; }
   T = Math.max(T, MIN_GAP);
-  const windows = Math.max(1, Math.round(g.quarterSec / T));
-  if (windows === 1) return { k, T: null, S, B, Lon: g.quarterSec, Loff: g.quarterSec };
-  T = g.quarterSec / windows;
+  const seg = g.breakAt ?? g.quarterSec;
+  const windows = Math.max(1, Math.round(seg / T));
+  if (windows === 1 && g.breakAt == null) return { k, T: null, S, B, Lon: g.quarterSec, Loff: g.quarterSec };
+  T = seg / windows;
   Lon = T * S / k;
   return { k, T, S, B, Lon, Loff: Lon * B / S };
 }
@@ -179,7 +192,7 @@ function suggestLineup(g) {
     // First lineup: the first kids to arrive start; the coach picks the goalie.
     return { gk: null, field: new Set(ps.sort(byArrival).slice(0, g.onField).map(p => p.id)) };
   }
-  const gk = [...ps].sort((a, b) => a.gkQ - b.gkQ || byGap(a, b))[0];
+  const gk = [...ps].sort((a, b) => a.gkSec - b.gkSec || byGap(a, b))[0];
   const field = ps.filter(p => p !== gk).sort(byGap).slice(0, g.onField - 1).map(p => p.id);
   return { gk: gk?.id ?? null, field: new Set(field) };
 }
@@ -188,7 +201,7 @@ function suggestLineup(g) {
 
 function pushUndo() {
   const g = G();
-  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
+  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, onField: g.onField, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
   if (undoStack.length > 20) undoStack.shift();
 }
 function undo() {
@@ -207,11 +220,11 @@ function createGame() {
   [...s.present].map(id => store.roster.find(r => r.id === id)).filter(Boolean).forEach((r, i) => {
     players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0, arrived: i + 1 };
   });
-  store.settings.onField = s.onField;
-  store.settings.quarterMin = s.quarterMin;
+  Object.assign(store.settings, { onField: s.onField, periods: s.periods, quarterMin: s.quarterMin, waterBreak: s.waterBreak });
   store.game = {
     id: uid(), date: new Date().toISOString(), opponent: s.opponent.trim(),
-    onField: s.onField, quarterSec: s.quarterMin * 60, quarter: 1, phase: 'lineup',
+    onField: s.onField, periods: s.periods, quarterSec: s.quarterMin * 60,
+    breakAt: s.periods === 2 && s.waterBreak ? s.quarterMin * 30 : null, quarter: 1, phase: 'lineup',
     clock: { acc: 0, since: null }, qStart: 0, qOver: false, plan: null, nextSubAt: null, fairT: 0,
   };
   G().players = players;
@@ -337,7 +350,7 @@ function finishGame() {
   Object.values(g.players).forEach(p => flush(p, t));
   accrue(g, t);
   const h = {
-    id: g.id, date: g.date, opponent: g.opponent, quarterMin: g.quarterSec / 60, onField: g.onField,
+    id: g.id, date: g.date, opponent: g.opponent, quarterMin: g.quarterSec / 60, periods: periods(g), onField: g.onField,
     quarters: g.quarter, gameSec: Math.round(t), synced: false,
     players: Object.values(g.players).map(p => ({ name: p.name, played: Math.round(p.played), gkSec: Math.round(p.gkSec), gkQ: p.gkQ, stints: p.stints, fair: Math.round(p.fair || 0) })),
   };
@@ -355,13 +368,37 @@ function discardGame() {
   save(); go('home');
 }
 
+// Change players per side mid-game (or at a lineup). The coach then picks who comes on or off.
+function setFieldSize(n) {
+  const g = G(), t = now(g);
+  n = Math.min(11, Math.max(3, n));
+  if (n === g.onField) return;
+  pushUndo();
+  accrue(g, t);
+  g.onField = store.settings.onField = n;
+  if (g.phase === 'lineup') view.draft = suggestLineup(g);
+  else replan(g, t);
+  save(); render(); renderSheet();
+}
+const over = g => g.phase === 'live' && onField(g).length > g.onField;
+const sizeWork = g => over(g) || (short(g) && onBench(g).length > 0);
+// Take a player off without a replacement (after shrinking the field).
+function benchPlayer(id) {
+  const g = G(), t = now(g);
+  pushUndo();
+  accrue(g, t);
+  move(g.players[id], 'bench', t);
+  replan(g, t);
+  view.sheet = null; save(); render();
+}
+
 /* ---------- Google Sheet sync (Apps Script web app) ---------- */
 
 function payload(h) {
   const d = new Date(h.date);
   const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return {
-    gameId: h.id, date: day, opponent: h.opponent || '', quarterMin: h.quarterMin, onField: h.onField,
+    gameId: h.id, date: day, opponent: h.opponent || '', quarterMin: h.quarterMin, periods: h.periods ?? QUARTERS, onField: h.onField,
     present: h.players.length,
     players: h.players.map(p => ({
       name: p.name, minutes: +(p.played / 60).toFixed(1), goalieMinutes: +(p.gkSec / 60).toFixed(1),
@@ -494,7 +531,8 @@ const $sheet = document.getElementById('sheet-root');
 function go(screen) {
   view.screen = screen; view.sheet = null; view.confirm = null;
   if (screen === 'setup') {
-    view.setup = { present: new Set(), onField: store.settings.onField, quarterMin: store.settings.quarterMin, opponent: '' };
+    const st = store.settings;
+    view.setup = { present: new Set(), onField: st.onField, periods: st.periods, quarterMin: st.quarterMin, waterBreak: st.waterBreak, opponent: '' };
   }
   if (screen === 'lineup' && !view.draft) view.draft = suggestLineup(G());
   render();
@@ -514,6 +552,8 @@ const I = {
   back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 010 11H11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   more: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/></svg>',
+  up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6m-6 6l6-6 6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v13m-6-6l6 6 6-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   arrow: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m-5-5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   glove: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 21v-3.2L5.2 13c-.6-1-.3-2.2.7-2.6.8-.4 1.7 0 2.1.7L9 13V5.5a1.5 1.5 0 013 0V11V4a1.5 1.5 0 013 0v7-5.5a1.5 1.5 0 013 0V15c0 3-1.6 4.6-3 5.5V21z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>',
   x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>',
@@ -535,10 +575,10 @@ function renderHome() {
     ${g ? `
       <button class="cta resume" data-act="resume">
         <span class="cta-k">Game in progress</span>
-        <span class="cta-t">Resume · Q${g.quarter} ${g.phase === 'lineup' ? 'lineup' : fmt(now(g) - g.qStart)}</span>
+        <span class="cta-t">Resume · ${pName(g)} ${g.phase === 'lineup' ? 'lineup' : fmt(now(g) - g.qStart)}</span>
       </button>` : `
       <button class="cta" data-act="new-game" ${canStart ? '' : 'disabled'}>
-        <span class="cta-k">${canStart ? `${store.settings.onField} a side · ${store.settings.quarterMin}-min quarters` : 'Add at least 2 players first'}</span>
+        <span class="cta-k">${canStart ? `${store.settings.onField} a side · ${formatText(store.settings)}` : 'Add at least 2 players first'}</span>
         <span class="cta-t">New game</span>
       </button>`}
 
@@ -612,22 +652,27 @@ function renderSetup() {
     <div class="card">
       <div class="stepper"><label>On the field <small>incl. goalie</small></label>
         <div class="step"><button data-act="step" data-k="onField" data-d="-1" aria-label="Fewer">−</button><output>${s.onField}</output><button data-act="step" data-k="onField" data-d="1" aria-label="More">+</button></div></div>
-      <div class="stepper"><label>Quarter length <small>minutes</small></label>
+      <div class="stepper"><label>Format</label>
+        <div class="seg" role="group" aria-label="Format">
+          <button data-act="format" data-n="2" aria-pressed="${s.periods === 2}">2 halves</button>
+          <button data-act="format" data-n="4" aria-pressed="${s.periods === 4}">4 quarters</button></div></div>
+      <div class="stepper"><label>${s.periods === 2 ? 'Half' : 'Quarter'} length <small>minutes</small></label>
         <div class="step"><button data-act="step" data-k="quarterMin" data-d="-1" aria-label="Shorter">−</button><output>${s.quarterMin}</output><button data-act="step" data-k="quarterMin" data-d="1" aria-label="Longer">+</button></div></div>
+      ${s.periods === 2 ? `<label class="check"><input type="checkbox" data-act="water" ${s.waterBreak ? 'checked' : ''}><span>Water break at ${s.quarterMin / 2 % 1 ? fmt(s.quarterMin * 30) : s.quarterMin / 2 + ':00'} <small>Clock keeps running. It's a sub point.</small></span></label>` : ''}
       <label class="field"><span>Opponent <small>optional</small></span><input id="opponent" value="${esc(s.opponent)}" placeholder="e.g. Blue Hawks" autocapitalize="words"></label>
     </div>
 
     <p class="hint">${n === 0 ? `Tap each player who's here today.` : n < s.onField ? `You need at least ${s.onField} players for ${s.onField} a side.`
       : B <= 0 ? `Exactly enough players. Everyone plays the whole game, no subs.`
-      : planBlurb(computePlan({ onField: s.onField, quarterSec: s.quarterMin * 60, players: Object.fromEntries([...s.present].map(id => [id, { state: 'bench' }])) }))}</p>
+      : planBlurb(computePlan({ onField: s.onField, quarterSec: s.quarterMin * 60, breakAt: s.periods === 2 && s.waterBreak ? s.quarterMin * 30 : null, players: Object.fromEntries([...s.present].map(id => [id, { state: 'bench' }])) }))}</p>
 
-    <button class="cta" data-act="create-game" ${n >= s.onField ? '' : 'disabled'}><span class="cta-k">${plural(n, 'player')} · ${B > 0 ? plural(B, 'sub') : 'no subs'}</span><span class="cta-t">Pick Q1 lineup</span></button>
+    <button class="cta" data-act="create-game" ${n >= s.onField ? '' : 'disabled'}><span class="cta-k">${plural(n, 'player')} · ${B > 0 ? plural(B, 'sub') : 'no subs'}</span><span class="cta-t">Pick starting lineup</span></button>
   </section>`;
 }
 
 function planBlurb(p) {
-  if (!p || p.B <= 0) return 'No bench this quarter. Everyone stays on.';
-  if (!p.T) return `Subs happen at quarter breaks only (${plural(p.B, 'player')} on the bench each quarter).`;
+  if (!p || p.B <= 0) return 'No bench right now. Everyone stays on.';
+  if (!p.T) return `Subs happen between periods only (${plural(p.B, 'player')} on the bench each period).`;
   return `Swap <b>${p.k}</b> every <b>${fmt(p.T)}</b>, so each kid plays about <b>${fmt(p.Lon)}</b> at a time and sits about <b>${fmt(p.Loff)}</b>.`;
 }
 
@@ -643,7 +688,7 @@ function renderLineup() {
   const ok = d.gk && starters === need && !d.field.has(d.gk);
   const showTime = !first;
   return `
-  ${topbar(`Q${g.quarter} lineup`, 'home', `<button class="icon-btn" data-act="menu" aria-label="Game menu">${I.more}</button>`)}
+  ${topbar(`${pName(g)} lineup`, 'home', `<button class="icon-btn" data-act="menu" aria-label="Game menu">${I.more}</button>`)}
   <section class="stack pad">
     <div class="lineup-count">
       <div class="lc ${d.gk ? 'done' : ''}"><span>${d.gk ? 1 : 0}<small>/1</small></span>Goalie</div>
@@ -656,7 +701,7 @@ function renderLineup() {
       return `<li class="${isGk ? 'is-gk' : on ? 'is-on' : 'is-bench'}">
         <button class="lu-main" data-act="lu-toggle" data-id="${p.id}">
           <span class="lu-state">${isGk ? 'GK' : on ? 'ON' : 'SUB'}</span>
-          <span class="lu-name">${esc(p.name)}${first && p.arrived ? `<small>Arrived #${p.arrived}</small>` : p.gkQ ? `<small>${plural(p.gkQ, 'qtr')} in goal</small>` : ''}</span>
+          <span class="lu-name">${esc(p.name)}${first && p.arrived ? `<small>Arrived #${p.arrived}</small>` : p.gkSec >= 30 ? `<small>${Math.round(p.gkSec / 60)} min in goal</small>` : ''}</span>
           ${showTime ? `<span class="lu-time">${fmt(played(p, t))}<small>${fmtDelta(gap(g, p, t))}</small></span>` : ''}
         </button>
         <button class="glove ${isGk ? 'on' : ''}" data-act="lu-gk" data-id="${p.id}" aria-label="Make ${esc(p.name)} goalie" aria-pressed="${isGk}">${I.glove}</button>
@@ -665,7 +710,7 @@ function renderLineup() {
       <div class="out-row"><span>${esc(p.name)} <small>${esc(p.reason || '')}</small></span><button class="link" data-act="return" data-id="${p.id}">Back in</button></div>`).join('')}</div>` : ''}
     <button class="cta" data-act="start-quarter" ${ok ? '' : 'disabled'}>
       <span class="cta-k">${ok ? 'Clock starts paused. Tap play on the whistle.' : !d.gk ? 'Tap a glove to choose a goalie' : `Pick ${need} starters, goalie included`}</span>
-      <span class="cta-t">Lock in Q${g.quarter}</span></button>
+      <span class="cta-t">Lock in ${pName(g)}</span></button>
   </section>`;
 }
 
@@ -678,13 +723,16 @@ function renderLive() {
   const out = Object.values(g.players).filter(p => p.state === 'out');
   const pairs = g.plan?.k ? suggest(g, t, g.plan.k) : [];
   const chosen = pairs.filter(([o]) => !view.keep.has(o.id));
-  const last = g.quarter >= QUARTERS;
+  const last = g.quarter >= periods(g);
+  const brk = isBreak(g, g.nextSubAt);
+  const offIds = new Set(chosen.map(([o]) => o.id)), onIds = new Set(chosen.map(([, i]) => i.id));
+  const tag = p => g.qOver ? '' : offIds.has(p.id) ? 'off' : onIds.has(p.id) ? 'on' : '';
 
   return `
   <header class="board ${g.qOver ? 'over' : st}">
     <div class="board-top">
       <button class="icon-btn" data-act="go" data-to="home" aria-label="Home">${I.back}</button>
-      <span class="q">Q${g.quarter}<small>/${QUARTERS}</small></span>
+      <span class="q">${pTag(g)}<small>/${periods(g)}</small></span>
       <span class="opp">${g.opponent ? 'vs ' + esc(g.opponent) : ''}</span>
       <button class="icon-btn" data-act="undo" ${undoStack.length ? '' : 'disabled'} aria-label="Undo">${I.undo}</button>
       <button class="icon-btn" data-act="menu" aria-label="Game menu">${I.more}</button>
@@ -692,7 +740,7 @@ function renderLive() {
     <div class="board-main">
       <div class="clock-wrap">
         <div class="clock" data-clock>${fmt(t - g.qStart)}</div>
-        <div class="clock-sub"><span data-left>${fmt(qEnd(g) - t)}</span> left in quarter</div>
+        <div class="clock-sub"><span data-left>${fmt(qEnd(g) - t)}</span> left in ${pWord(g)}</div>
         <button class="awake ${isAwake() ? 'on' : ''}" data-act="awake" data-awake>${awakeLabel()}</button>
       </div>
       ${g.qOver ? '' : `<button class="play ${running(g) ? 'is-running' : 'is-paused'}" data-act="clock" aria-label="${running(g) ? 'Pause' : 'Start'} clock">${running(g) ? I.pause : I.play}</button>`}
@@ -702,18 +750,20 @@ function renderLive() {
 
   ${g.qOver ? `
     <section class="callout end">
-      <h2>End of Q${g.quarter}</h2>
+      <h2>End of ${halves(g) ? `the ${pName(g)}` : pName(g)}</h2>
       <p>${last ? 'That\'s the game. Wrap it up to save everyone\'s minutes.' : 'Time to set the next lineup. The fewest-minutes kids go on first.'}</p>
-      <button class="cta dark" data-act="${last ? 'finish' : 'next-quarter'}"><span class="cta-t">${last ? 'Finish game' : `Set Q${g.quarter + 1} lineup`}</span></button>
+      <button class="cta dark" data-act="${last ? 'finish' : 'next-quarter'}"><span class="cta-t">${last ? 'Finish game' : `Set ${pName(g, g.quarter + 1)} lineup`}</span></button>
     </section>`
   : pairs.length && (st === 'due' || st === 'soon') ? `
     <section class="callout ${st}">
-      <h2>${st === 'due' ? 'Sub now' : 'Get ready to sub'}</h2>
-      <p class="pair-hint">Suggested swaps. Tap one to keep that player on.</p>
+      <h2>${brk ? (st === 'due' ? 'Water break · sub now' : 'Water break soon') : st === 'due' ? 'Sub now' : 'Get ready to sub'}</h2>
+      <p class="pair-hint">${brk ? 'Clock keeps running. ' : ''}Suggested swaps. Tap one to keep that player on.</p>
       <ul class="pairs">${pairs.map(([o, i]) => { const kept = view.keep.has(o.id); return `
-        <li><button class="pair ${kept ? 'kept' : ''}" data-act="toggle-pair" data-id="${o.id}" aria-pressed="${!kept}">
-          <span class="po"><small>${kept ? 'Stays on' : 'Off'}</small>${esc(o.name)}</span>${I.arrow}<span class="pi"><small>${kept ? 'Stays on bench' : 'On'}</small>${esc(i.name)}</span>
+        <li><button class="pair ${kept ? 'kept' : ''}" data-act="toggle-pair" data-id="${o.id}" aria-pressed="${!kept}" aria-label="${kept ? `Keep ${esc(o.name)} on` : `${esc(o.name)} off, ${esc(i.name)} on`}">
+          <span class="po"><small>${kept ? 'Stays on' : `${I.down}Off`}</small><b>${esc(o.name)}</b></span>
+          <span class="pi"><small>${kept ? 'Stays on bench' : `${I.up}On`}</small><b>${esc(i.name)}</b></span>
         </button></li>`; }).join('')}</ul>
+      ${brk ? `<button class="ghost light gk-switch" data-act="sheet" data-type="switchgk">${I.glove} Change goalie at the break</button>` : ''}
       <div class="row-btns">${chosen.length
         ? `<button class="cta dark" data-act="do-subs"><span class="cta-t">Make ${chosen.length === 1 ? 'this sub' : `these ${chosen.length}`}</span></button>`
         : `<button class="cta dark" data-act="skip"><span class="cta-t">Keep everyone on</span></button>`}
@@ -722,37 +772,39 @@ function renderLive() {
   : pairs.length ? `
     <section class="ondeck">
       <span class="od-k">Up next</span>
-      <span class="od-v">${chosen.length ? `<b>${chosen.map(p => esc(p[1].name)).join(', ')}</b> in for ${chosen.map(p => esc(p[0].name)).join(', ')}` : 'Everyone stays on'}</span>
+      <span class="od-v">${chosen.length ? chosen.map(([o, i]) => `<span class="od-pair"><i class="tagx on">${I.up}${esc(i.name)}</i><i class="tagx off">${I.down}${esc(o.name)}</i></span>`).join('') : 'Everyone stays on'}${brk ? '<small>at the water break</small>' : ''}</span>
       ${chosen.length ? '<button class="link" data-act="do-subs">Sub now</button>' : ''}
     </section>` : ''}
 
   <section class="pad stack-sm">
-    <div class="sec-h"><h2>On the field <span>${field.length}${short(g) ? `<em class="short">of ${g.onField} · playing short</em>` : ''}</span></h2><span class="legend">vs fair share</span></div>
-    <ul class="players">${field.map(p => playerRow(p, t)).join('')}</ul>
+    <div class="sec-h"><h2>On the field <span>${field.length}${short(g) ? `<em class="short">of ${g.onField} · playing short</em>` : over(g) ? `<em class="short">of ${g.onField} · too many</em>` : ''}</span></h2><span class="legend">vs fair share</span></div>
+    ${sizeWork(g) ? `<button class="btn wide size-fix" data-act="sheet" data-type="size">${over(g) ? `Take ${plural(onField(g).length - g.onField, 'player')} off` : `Fill ${plural(g.onField - onField(g).length, 'empty spot')}`}</button>` : ''}
+    <ul class="players">${field.map(p => playerRow(p, t, tag(p))).join('')}</ul>
     ${bench.length ? `
     <div class="sec-h"><h2>Bench <span>${bench.length}</span></h2><span class="legend">most owed first</span></div>
-    <ul class="players">${bench.map(p => playerRow(p, t)).join('')}</ul>` : ''}
+    <ul class="players">${bench.map(p => playerRow(p, t, tag(p))).join('')}</ul>` : ''}
     ${out.length ? `
     <div class="sec-h"><h2>Sidelined <span>${out.length}</span></h2></div>
     <ul class="players">${out.map(p => playerRow(p, t)).join('')}</ul>` : ''}
     <p class="plan-note">${planBlurb(g.plan)}</p>
-    ${g.qOver ? '' : `<button class="ghost" data-act="end-quarter">End Q${g.quarter} early</button>`}
+    ${g.qOver ? '' : `<button class="ghost" data-act="end-quarter">End ${halves(g) ? 'the ' : ''}${pName(g)} early</button>`}
   </section>`;
 }
 
 function subLine(g, t, st) {
-  if (g.qOver) return `<div class="subline"><span class="sl-k">Quarter over</span></div>`;
-  if (!g.plan?.T) return `<div class="subline"><span class="sl-k">${g.plan?.B > 0 ? 'Next change at quarter break' : 'No bench. Everyone plays.'}</span></div>`;
-  if (g.nextSubAt == null) return `<div class="subline"><span class="sl-k">No more subs this quarter</span></div>`;
-  const label = st === 'due' ? 'SUB NOW' : st === 'soon' ? 'Get ready' : 'Next sub in';
+  if (g.qOver) return `<div class="subline"><span class="sl-k">${halves(g) ? 'Half' : 'Quarter'} over</span></div>`;
+  if (!g.plan?.T) return `<div class="subline"><span class="sl-k">${g.plan?.B > 0 ? `Next change at the ${pWord(g)} break` : 'No bench. Everyone plays.'}</span></div>`;
+  if (g.nextSubAt == null) return `<div class="subline"><span class="sl-k">No more subs this ${pWord(g)}</span></div>`;
+  const brk = isBreak(g, g.nextSubAt);
+  const label = st === 'due' ? (brk ? 'WATER BREAK · SUB' : 'SUB NOW') : st === 'soon' ? 'Get ready' : brk ? 'Water break in' : 'Next sub in';
   return `<div class="subline"><span class="sl-k">${label}</span><span class="sl-v" data-next>${st === 'due' ? '+' + fmt(t - g.nextSubAt) : fmt(g.nextSubAt - t)}</span>
     <div class="sl-bar"><i data-bar style="--p:${subProgress(g, t)}"></i></div></div>`;
 }
 const subProgress = (g, t) => Math.min(1, Math.max(0, 1 - (g.nextSubAt - t) / g.plan.T)).toFixed(4);
 
-function playerRow(p, t) {
-  return `<li><button class="prow ${p.state}${p.gk ? ' gk' : ''}" data-act="player" data-id="${p.id}" data-pid="${p.id}">
-    <span class="pr-name"><span>${p.gk ? `<i class="gk-tag">GK</i>` : ''}${esc(p.name)}</span><small data-meta>${metaText(p, t)}</small></span>
+function playerRow(p, t, tag = '') {
+  return `<li><button class="prow ${p.state}${p.gk ? ' gk' : ''}${tag ? ' next-' + tag : ''}" data-act="player" data-id="${p.id}" data-pid="${p.id}">
+    <span class="pr-name"><span>${p.gk ? `<i class="gk-tag">GK</i>` : ''}${tag ? `<i class="tagx ${tag}">${tag === 'off' ? I.down + 'Off next' : I.up + 'On next'}</i>` : ''}${esc(p.name)}</span><small data-meta>${metaText(p, t)}</small></span>
     <span class="meter"><i data-meter></i></span>
     <span class="pr-num"><b data-tot>${fmt(played(p, t))}</b><small data-delta></small></span>
   </button></li>`;
@@ -900,12 +952,12 @@ function renderSettings() {
     </div>
     <div class="card">
       <div class="card-h"><h2>Sound</h2></div>
-      <p class="hint">A two-note chime 20 seconds before a sub, a longer chime when it's time, and a low chime at the end of a quarter. It plays even with the silent switch on. Turn the volume up.</p>
+      <p class="hint">A two-note chime 20 seconds before a sub, a longer chime when it's time, and a low chime at the end of a half or quarter. It plays even with the silent switch on. Turn the volume up.</p>
       <div class="row-btns"><button class="btn alt" data-act="test-sound">Test sound</button></div>
     </div>
     <div class="card">
       <div class="card-h"><h2>How subs are planned</h2></div>
-      <p class="hint">The app aims for shifts of about ${fmt(TARGET_RUN)}, keeps bench time under about ${fmt(MAX_REST)} when the roster allows, and won't ask you to sub more often than every ${fmt(MIN_GAP)}. Sub windows divide each quarter evenly. Quarter breaks are always a sub point. Goalies stay in for the full quarter, and goalie time counts as playing time.</p>
+      <p class="hint">The app aims for shifts of about ${fmt(TARGET_RUN)}, keeps bench time under about ${fmt(MAX_REST)} when the roster allows, and won't ask you to sub more often than every ${fmt(MIN_GAP)}. Sub windows divide each period evenly. Breaks between periods, and the water break, are always sub points. Goalies stay in for the period (you can switch at the water break), and goalie time counts as playing time.</p>
     </div>
   </section>`;
 }
@@ -958,11 +1010,38 @@ function renderSheet() {
     body = `<h2>Who goes in goal?</h2><p class="hint">Nobody on the bench, so you're playing short. Pick a keeper from the field.</p>
       <div class="pick">${onField(g).map(c => `<button class="pick-btn" data-act="make-gk" data-id="${c.id}">${esc(c.name)}</button>`).join('')}</div>`;
   }
+  else if (s.type === 'size') {
+    const n = onField(g).length;
+    body = `<h2>Players per side</h2>
+      <div class="stepper big"><label>On the field <small>incl. goalie</small></label>
+        <div class="step"><button data-act="resize" data-d="-1" aria-label="Fewer">−</button><output>${g.onField}</output><button data-act="resize" data-d="1" aria-label="More">+</button></div></div>`;
+    if (over(g)) {
+      const cands = onField(g).filter(p => !p.gk).sort((a, b) => gap(g, b, t) - gap(g, a, t));
+      body += `<h3>Who comes off? <small>${plural(n - g.onField, 'more')} to go · most played first</small></h3>
+        <div class="pick">${cands.map((c, i) => `<button class="pick-btn off ${i === 0 ? 'top' : ''}" data-act="trim" data-id="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>`;
+    } else if (short(g) && onBench(g).length) {
+      const cands = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t));
+      body += `<h3>Who comes on? <small>${plural(g.onField - n, 'spot')} open · most owed first</small></h3>
+        <div class="pick">${cands.map((c, i) => `<button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="fill" data-id="${c.id}">${esc(c.name)}<small>${fmt(played(c, t))}</small></button>`).join('')}</div>`;
+    } else if (g.phase === 'live') body += `<p class="hint">${n} on the field. Sub timing now plans for ${g.onField} a side.</p><button class="btn wide" data-act="close-sheet">Done</button>`;
+    else body += `<p class="hint">The lineup will update for ${g.onField} a side.</p><button class="btn wide" data-act="close-sheet">Done</button>`;
+  }
+  else if (s.type === 'switchgk') {
+    const k = onField(g).find(p => p.gk);
+    const field = onField(g).filter(p => !p.gk).sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t));
+    const bench = onBench(g).sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t));
+    body = `<h2>New goalie</h2><p class="hint">${k ? `${esc(k.name)} comes out of goal. ` : ''}Fewest goalie minutes first.</p>
+      <h3>From the field <small>${k ? `${esc(k.name)} plays the field` : ''}</small></h3>
+      <div class="pick">${field.map(c => `<button class="pick-btn" data-act="make-gk" data-id="${c.id}">${esc(c.name)}<small>${Math.round(c.gkSec / 60)}m in goal</small></button>`).join('')}</div>
+      ${bench.length && k ? `<h3>From the bench <small>${esc(k.name)} sits</small></h3>
+      <div class="pick">${bench.map(c => `<button class="pick-btn" data-act="gk-swap" data-off="${k.id}" data-on="${c.id}">${esc(c.name)}<small>${Math.round(c.gkSec / 60)}m in goal</small></button>`).join('')}</div>` : ''}`;
+  }
   else if (s.type === 'menu') {
     const inLive = g.phase === 'live';
     body = `<h2>Game</h2><div class="menu">
       <button data-act="sheet" data-type="late">Add a late arrival</button>
-      ${inLive && !g.qOver ? `<button data-act="end-quarter">End Q${g.quarter} now</button>` : ''}
+      <button data-act="sheet" data-type="size">Players per side · ${g.onField}</button>
+      ${inLive && !g.qOver ? `<button data-act="end-quarter">End ${halves(g) ? 'the ' : ''}${pName(g)} now</button>` : ''}
       <button data-act="test-sound">Test sound (turn the volume up)</button>
       <button data-act="finish">Finish game & save</button>
       <button class="danger" data-act="discard">${view.confirm === 'discard' ? 'Tap again to discard without saving' : 'Discard game'}</button>
@@ -1000,10 +1079,14 @@ const actions = {
   'present-all': () => { view.setup.present = new Set(store.roster.map(r => r.id)); render(); },
   'present-none': () => { view.setup.present = new Set(); render(); },
   step: d => {
-    const s = view.setup, lim = { onField: [3, 11], quarterMin: [4, 30] }[d.k];
+    const s = view.setup, lim = { onField: [3, 11], quarterMin: [4, 45] }[d.k];
     s[d.k] = Math.min(lim[1], Math.max(lim[0], s[d.k] + +d.d)); render();
   },
   'create-game': createGame,
+  format: d => { const s = view.setup; s.periods = +d.n; s.quarterMin = s.periods === 2 ? 20 : 10; render(); },
+  water: (d, el) => { view.setup.waterBreak = el.checked; render(); },
+  resize: d => setFieldSize(G().onField + +d.d),
+  trim: d => { benchPlayer(d.id); if (sizeWork(G())) { view.sheet = { type: 'size' }; renderSheet(); } },
   'lu-toggle': d => {
     const dr = view.draft;
     if (dr.gk === d.id) dr.gk = null;
@@ -1032,8 +1115,10 @@ const actions = {
   'toggle-pair': d => { view.keep.has(d.id) ? view.keep.delete(d.id) : view.keep.add(d.id); render(); },
   skip: skipWindow,
   'make-gk': d => makeGoalie(d.id),
+  // A goalie change at the water break doesn't use up the break's planned subs.
+  'gk-swap': d => { const g = G(), t = now(g); pushUndo(); swap(g.players[d.off], g.players[d.on], t); view.sheet = null; save(); render(); },
   'test-sound': () => chime('due'),
-  fill: d => fillSpot(d.id),
+  fill: d => { const was = view.sheet?.type; fillSpot(d.id); if (was === 'size' && sizeWork(G())) { view.sheet = { type: 'size' }; renderSheet(); } },
   sideline: d => {
     const g = G(), p = g.players[d.id];
     if (p.state === 'field' && g.phase === 'live' && onBench(g).length) { view.sheet = { type: 'replace', id: d.id, reason: d.reason }; renderSheet(); return; }
