@@ -28,7 +28,7 @@ const alerted = { heads: null, due: null };
 
 function load() {
   // quarterMin is the length of one period (half or quarter); the name predates halves.
-  const fresh = { roster: [], settings: { onField: 6, periods: 2, quarterMin: 20, waterBreak: true, sheetUrl: '' }, game: null, history: [] };
+  const fresh = { roster: [], settings: { onField: 6, periods: 2, quarterMin: 20, waterBreak: true, gkAtBreak: true, sheetUrl: '' }, game: null, history: [] };
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
     if (s && s.settings && s.settings.periods == null) Object.assign(s.settings, { periods: 2, quarterMin: 20, waterBreak: true });
@@ -66,6 +66,8 @@ const pWord = g => halves(g) ? 'half' : 'quarter';
 const pTag = (g, n = g.quarter) => (halves(g) ? 'H' : 'Q') + n;
 const pName = (g, n = g.quarter) => halves(g) ? (n === 1 ? '1st half' : '2nd half') : 'Q' + n;
 const formatText = s => `${s.periods === 2 ? `2 × ${s.quarterMin}-min halves` : `4 × ${s.quarterMin}-min quarters`}${s.periods === 2 && s.waterBreak ? ' · water break' : ''}`;
+// Swap the goalie at the water break too (4 goalies a game with halves)?
+const gkAtBreak = g => g.breakAt != null && g.gkAtBreak !== false;
 // The water break is halfway through a period; the clock keeps running through it.
 const isBreak = (g, at) => g.breakAt != null && at != null && Math.abs(at - g.qStart - g.breakAt) < 1;
 function now(g = G()) {
@@ -175,12 +177,22 @@ function subStatus(g, t) {
 }
 
 // Most-played skaters come off (skip anyone who just went on); least-played go in.
+// At the water break (if set), the goalie swap comes first: a new keeper from the
+// bench (fewest goalie minutes, then most owed), and the outgoing goalie sits.
 function suggest(g, t, k) {
   const out = onField(g).filter(p => !p.gk && stint(p, t) >= FRESH)
     .sort((a, b) => gap(g, b, t) - gap(g, a, t) || stint(b, t) - stint(a, t));
-  const inn = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t) || a.since - b.since);
+  let inn = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t) || a.since - b.since);
+  const pairs = [];
+  const keeper = onField(g).find(p => p.gk);
+  if (keeper && gkAtBreak(g) && isBreak(g, g.nextSubAt) && g.gkChangedAt !== g.nextSubAt && inn.length) {
+    const nk = [...inn].sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t))[0];
+    pairs.push([keeper, nk]);
+    inn = inn.filter(p => p !== nk);
+  }
   const n = Math.min(k, out.length, inn.length);
-  return Array.from({ length: n }, (_, i) => [out[i], inn[i]]);
+  for (let i = 0; i < n; i++) pairs.push([out[i], inn[i]]);
+  return pairs;
 }
 
 const byArrival = (a, b) => (a.arrived ?? 0) - (b.arrived ?? 0);
@@ -192,8 +204,12 @@ function suggestLineup(g) {
     // First lineup: the first kids to arrive start; the coach picks the goalie.
     return { gk: null, field: new Set(ps.sort(byArrival).slice(0, g.onField).map(p => p.id)) };
   }
-  const gk = [...ps].sort((a, b) => a.gkSec - b.gkSec || byGap(a, b))[0];
-  const field = ps.filter(p => p !== gk).sort(byGap).slice(0, g.onField - 1).map(p => p.id);
+  // The goalie who just finished starts this period on the bench (if there's room).
+  const last = g.players[g.lastKeeper];
+  const gk = [...ps].filter(p => p !== last).sort((a, b) => a.gkSec - b.gkSec || byGap(a, b))[0] ?? last;
+  const rest = ps.filter(p => p !== gk).sort(byGap);
+  const sit = rest.length > g.onField - 1 && last && last !== gk ? last : null;
+  const field = rest.filter(p => p !== sit).slice(0, g.onField - 1).map(p => p.id);
   return { gk: gk?.id ?? null, field: new Set(field) };
 }
 
@@ -201,7 +217,7 @@ function suggestLineup(g) {
 
 function pushUndo() {
   const g = G();
-  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, onField: g.onField, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
+  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, gkChangedAt: g.gkChangedAt ?? null, onField: g.onField, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
   if (undoStack.length > 20) undoStack.shift();
 }
 function undo() {
@@ -220,11 +236,11 @@ function createGame() {
   [...s.present].map(id => store.roster.find(r => r.id === id)).filter(Boolean).forEach((r, i) => {
     players[r.id] = { id: r.id, name: r.name, state: 'bench', gk: false, played: 0, gkSec: 0, since: t, gkQ: 0, stints: 0, reason: null, fair: 0, arrived: i + 1 };
   });
-  Object.assign(store.settings, { onField: s.onField, periods: s.periods, quarterMin: s.quarterMin, waterBreak: s.waterBreak });
+  Object.assign(store.settings, { onField: s.onField, periods: s.periods, quarterMin: s.quarterMin, waterBreak: s.waterBreak, gkAtBreak: s.gkAtBreak });
   store.game = {
     id: uid(), date: new Date().toISOString(), opponent: s.opponent.trim(),
     onField: s.onField, periods: s.periods, quarterSec: s.quarterMin * 60,
-    breakAt: s.periods === 2 && s.waterBreak ? s.quarterMin * 30 : null, quarter: 1, phase: 'lineup',
+    breakAt: s.periods === 2 && s.waterBreak ? s.quarterMin * 30 : null, gkAtBreak: s.gkAtBreak, quarter: 1, phase: 'lineup',
     clock: { acc: 0, since: null }, qStart: 0, qOver: false, plan: null, nextSubAt: null, fairT: 0,
   };
   G().players = players;
@@ -260,6 +276,7 @@ function endQuarterNow() {
 function nextQuarter() {
   const g = G(), t = now(g);
   Object.values(g.players).forEach(p => flush(p, t));
+  g.lastKeeper = g.keeper;
   g.quarter++; g.qStart = t; g.qOver = false; g.phase = 'lineup';
   g.clock.acc = t; g.clock.since = null;
   view.draft = suggestLineup(g);
@@ -279,7 +296,7 @@ function swap(off, on, t) {
   const g = G(), wasGk = off.gk;
   move(off, 'bench', t);
   move(on, 'field', t);
-  if (wasGk) setGoalie(g, on.id, t);
+  if (wasGk) { setGoalie(g, on.id, t); on.gkQ++; g.gkChangedAt = g.nextSubAt; }
 }
 function skipWindow() {
   const g = G();
@@ -292,6 +309,7 @@ function makeGoalie(id) {
   const g = G(), t = now(g);
   pushUndo();
   setGoalie(g, id, t);
+  g.players[id].gkQ++; g.gkChangedAt = g.nextSubAt; // one goalie change per break
   view.sheet = null; save(); render();
 }
 
@@ -532,7 +550,7 @@ function go(screen) {
   view.screen = screen; view.sheet = null; view.confirm = null;
   if (screen === 'setup') {
     const st = store.settings;
-    view.setup = { present: new Set(), onField: st.onField, periods: st.periods, quarterMin: st.quarterMin, waterBreak: st.waterBreak, opponent: '' };
+    view.setup = { present: new Set(), onField: st.onField, periods: st.periods, quarterMin: st.quarterMin, waterBreak: st.waterBreak, gkAtBreak: st.gkAtBreak, opponent: '' };
   }
   if (screen === 'lineup' && !view.draft) view.draft = suggestLineup(G());
   render();
@@ -658,7 +676,8 @@ function renderSetup() {
           <button data-act="format" data-n="4" aria-pressed="${s.periods === 4}">4 quarters</button></div></div>
       <div class="stepper"><label>${s.periods === 2 ? 'Half' : 'Quarter'} length <small>minutes</small></label>
         <div class="step"><button data-act="step" data-k="quarterMin" data-d="-1" aria-label="Shorter">−</button><output>${s.quarterMin}</output><button data-act="step" data-k="quarterMin" data-d="1" aria-label="Longer">+</button></div></div>
-      ${s.periods === 2 ? `<label class="check"><input type="checkbox" data-act="water" ${s.waterBreak ? 'checked' : ''}><span>Water break at ${s.quarterMin / 2 % 1 ? fmt(s.quarterMin * 30) : s.quarterMin / 2 + ':00'} <small>Clock keeps running. It's a sub point.</small></span></label>` : ''}
+      ${s.periods === 2 ? `<label class="check"><input type="checkbox" data-act="water" ${s.waterBreak ? 'checked' : ''}><span>Water break at ${s.quarterMin / 2 % 1 ? fmt(s.quarterMin * 30) : s.quarterMin / 2 + ':00'} <small>Clock keeps running. It's a sub point.</small></span></label>
+      ${s.waterBreak ? `<label class="check"><input type="checkbox" data-act="gkbreak" ${s.gkAtBreak ? 'checked' : ''}><span>New goalie at the water break <small>4 goalies a game. The outgoing goalie sits.</small></span></label>` : ''}` : ''}
       <label class="field"><span>Opponent <small>optional</small></span><input id="opponent" value="${esc(s.opponent)}" placeholder="e.g. Blue Hawks" autocapitalize="words"></label>
     </div>
 
@@ -760,10 +779,10 @@ function renderLive() {
       <p class="pair-hint">${brk ? 'Clock keeps running. ' : ''}Suggested swaps. Tap one to keep that player on.</p>
       <ul class="pairs">${pairs.map(([o, i]) => { const kept = view.keep.has(o.id); return `
         <li><button class="pair ${kept ? 'kept' : ''}" data-act="toggle-pair" data-id="${o.id}" aria-pressed="${!kept}" aria-label="${kept ? `Keep ${esc(o.name)} on` : `${esc(o.name)} off, ${esc(i.name)} on`}">
-          <span class="po"><small>${kept ? 'Stays on' : `${I.down}Off`}</small><b>${esc(o.name)}</b></span>
-          <span class="pi"><small>${kept ? 'Stays on bench' : `${I.up}On`}</small><b>${esc(i.name)}</b></span>
+          <span class="po"><small>${kept ? (o.gk ? 'Stays in goal' : 'Stays on') : `${I.down}${o.gk ? 'Out of goal' : 'Off'}`}</small><b>${esc(o.name)}</b></span>
+          <span class="pi"><small>${kept ? 'Stays on bench' : `${I.up}${o.gk ? 'In goal' : 'On'}`}</small><b>${esc(i.name)}</b></span>
         </button></li>`; }).join('')}</ul>
-      ${brk ? `<button class="ghost light gk-switch" data-act="sheet" data-type="switchgk">${I.glove} Change goalie at the break</button>` : ''}
+      ${brk ? `<button class="ghost light gk-switch" data-act="sheet" data-type="switchgk">${I.glove} ${gkAtBreak(g) ? 'Pick a different goalie' : 'Change goalie at the break'}</button>` : ''}
       <div class="row-btns">${chosen.length
         ? `<button class="cta dark" data-act="do-subs"><span class="cta-t">Make ${chosen.length === 1 ? 'this sub' : `these ${chosen.length}`}</span></button>`
         : `<button class="cta dark" data-act="skip"><span class="cta-t">Keep everyone on</span></button>`}
@@ -1028,13 +1047,14 @@ function renderSheet() {
   }
   else if (s.type === 'switchgk') {
     const k = onField(g).find(p => p.gk);
-    const field = onField(g).filter(p => !p.gk).sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t));
-    const bench = onBench(g).sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t));
-    body = `<h2>New goalie</h2><p class="hint">${k ? `${esc(k.name)} comes out of goal. ` : ''}Fewest goalie minutes first.</p>
-      <h3>From the field <small>${k ? `${esc(k.name)} plays the field` : ''}</small></h3>
-      <div class="pick">${field.map(c => `<button class="pick-btn" data-act="make-gk" data-id="${c.id}">${esc(c.name)}<small>${Math.round(c.gkSec / 60)}m in goal</small></button>`).join('')}</div>
+    const order = (a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t);
+    const field = onField(g).filter(p => !p.gk).sort(order), bench = onBench(g).sort(order);
+    const gkCard = c => `<small>${c.gkSec >= 30 ? Math.round(c.gkSec / 60) + 'm in goal' : 'not in goal yet'}</small>`;
+    body = `<h2>New goalie</h2><p class="hint">Fewest goalie minutes first.</p>
       ${bench.length && k ? `<h3>From the bench <small>${esc(k.name)} sits</small></h3>
-      <div class="pick">${bench.map(c => `<button class="pick-btn" data-act="gk-swap" data-off="${k.id}" data-on="${c.id}">${esc(c.name)}<small>${Math.round(c.gkSec / 60)}m in goal</small></button>`).join('')}</div>` : ''}`;
+      <div class="pick">${bench.map((c, i) => `<button class="pick-btn ${i === 0 ? 'top' : ''}" data-act="gk-swap" data-off="${k.id}" data-on="${c.id}">${esc(c.name)}${gkCard(c)}</button>`).join('')}</div>` : ''}
+      <h3>From the field <small>${k ? `${esc(k.name)} plays the field` : ''}</small></h3>
+      <div class="pick">${field.map(c => `<button class="pick-btn" data-act="make-gk" data-id="${c.id}">${esc(c.name)}${gkCard(c)}</button>`).join('')}</div>`;
   }
   else if (s.type === 'menu') {
     const inLive = g.phase === 'live';
@@ -1085,6 +1105,7 @@ const actions = {
   'create-game': createGame,
   format: d => { const s = view.setup; s.periods = +d.n; s.quarterMin = s.periods === 2 ? 20 : 10; render(); },
   water: (d, el) => { view.setup.waterBreak = el.checked; render(); },
+  gkbreak: (d, el) => { view.setup.gkAtBreak = el.checked; render(); },
   resize: d => setFieldSize(G().onField + +d.d),
   trim: d => { benchPlayer(d.id); if (sizeWork(G())) { view.sheet = { type: 'size' }; renderSheet(); } },
   'lu-toggle': d => {
