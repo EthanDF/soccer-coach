@@ -438,6 +438,9 @@ input:focus, textarea:focus { border-color: var(--purple); }
 .btn.pick-subs { margin-top: 12px; }
 .btn.pick-subs svg { width: 18px; height: 18px; margin-right: -6px; }
 .still { animation: none; }
+.cta.queue { background: var(--lavender); color: var(--ink); box-shadow: inset 0 0 0 2px var(--purple); }
+.cta.queue::after { border-color: var(--link); }
+.od-btns { display: grid; justify-items: end; }
 .reasons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .reason { min-height: 52px; border-radius: 12px; font-weight: 700; box-shadow: inset 0 0 0 2px var(--rule); }
 .menu { display: grid; gap: 8px; }

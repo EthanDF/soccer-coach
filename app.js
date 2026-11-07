@@ -163,7 +163,11 @@ function nextWindow(g, t) {
   const at = g.qStart + n * g.plan.T;
   return at <= qEnd(g) - 45 ? at : null;
 }
-function replan(g, t) { g.plan = computePlan(g); g.nextSubAt = nextWindow(g, t); }
+function replan(g, t) {
+  const was = g.nextSubAt;
+  g.plan = computePlan(g); g.nextSubAt = nextWindow(g, t);
+  if (g.queue?.at === was) g.queue.at = g.nextSubAt; // queued subs follow the window if it moves
+}
 
 // Doing subs near (or after) a window counts as handling it.
 function windowHandled(g, t) {
@@ -179,17 +183,20 @@ function subStatus(g, t) {
 // Most-played skaters come off (skip anyone who just went on); least-played go in.
 // At the water break (if set), the goalie swap comes first: a new keeper from the
 // bench (fewest goalie minutes, then most owed), and the outgoing goalie sits.
+// Subs the coach queued (from Pick subs) replace the suggestion at that window.
 function suggest(g, t, k) {
+  const q = queued(g);
   const out = onField(g).filter(p => !p.gk && stint(p, t) >= FRESH)
     .sort((a, b) => gap(g, b, t) - gap(g, a, t) || stint(b, t) - stint(a, t));
-  let inn = onBench(g).sort((a, b) => gap(g, a, t) - gap(g, b, t) || a.since - b.since);
+  let inn = onBench(g).filter(p => !q?.some(([, i]) => i === p)).sort((a, b) => gap(g, a, t) - gap(g, b, t) || a.since - b.since);
   const pairs = [];
   const keeper = onField(g).find(p => p.gk);
-  if (keeper && gkAtBreak(g) && isBreak(g, g.nextSubAt) && g.gkChangedAt !== g.nextSubAt && inn.length) {
+  if (keeper && gkAtBreak(g) && isBreak(g, g.nextSubAt) && g.gkChangedAt !== g.nextSubAt && inn.length && !q?.some(([o]) => o === keeper)) {
     const nk = [...inn].sort((a, b) => a.gkSec - b.gkSec || gap(g, a, t) - gap(g, b, t))[0];
     pairs.push([keeper, nk]);
     inn = inn.filter(p => p !== nk);
   }
+  if (q) return [...pairs, ...q];
   const n = Math.min(k, out.length, inn.length);
   for (let i = 0; i < n; i++) pairs.push([out[i], inn[i]]);
   return pairs;
@@ -216,10 +223,20 @@ function fillOffs(s) {
   }
   s.auto = s.auto.filter(id => s.off.includes(id));
 }
+// Queued subs are kept as id pairs for one window (g.queue.at); players who've
+// since moved (sidelined, already subbed) drop out of the queue.
+function queued(g) {
+  const q = g.queue;
+  if (!q || q.at == null || q.at !== g.nextSubAt) return null;
+  const pairs = q.pairs.map(([o, i]) => [g.players[o], g.players[i]]).filter(([o, i]) => o?.state === 'field' && i?.state === 'bench');
+  return pairs.length ? pairs : null;
+}
 // From the sub callout, start from its suggestion (minus anyone the coach kept on).
+// Otherwise start from the queue, if there is one, so it can be changed.
 function openPickSubs(fromCallout) {
   const g = G(), t = now(g);
   const s = { type: 'subs', on: [], off: [], auto: [], keep: [], planned: fromCallout };
+  if (!fromCallout) queued(g)?.forEach(([o, i]) => { s.off.push(o.id); s.on.push(i.id); });
   if (fromCallout && g.plan?.k) {
     suggest(g, t, g.plan.k).forEach(([o, i]) => {
       if (view.keep.has(o.id)) s.keep.push(o.id);
@@ -257,7 +274,7 @@ function suggestLineup(g) {
 
 function pushUndo() {
   const g = G();
-  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, gkChangedAt: g.gkChangedAt ?? null, onField: g.onField, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
+  undoStack.push(JSON.stringify({ players: g.players, keeper: g.keeper, gkChangedAt: g.gkChangedAt ?? null, queue: g.queue ?? null, onField: g.onField, plan: g.plan, nextSubAt: g.nextSubAt, fairT: g.fairT }));
   if (undoStack.length > 20) undoStack.shift();
 }
 function undo() {
@@ -784,6 +801,7 @@ function renderLive() {
   const chosen = pairs.filter(([o]) => !view.keep.has(o.id));
   const last = g.quarter >= periods(g);
   const brk = isBreak(g, g.nextSubAt);
+  const q = !!queued(g);
   const offIds = new Set(chosen.map(([o]) => o.id)), onIds = new Set(chosen.map(([, i]) => i.id));
   const tag = p => g.qOver ? '' : offIds.has(p.id) ? 'off' : onIds.has(p.id) ? 'on' : '';
 
@@ -816,7 +834,7 @@ function renderLive() {
   : pairs.length && (st === 'due' || st === 'soon') ? `
     <section class="callout ${st}">
       <h2>${brk ? (st === 'due' ? 'Water break · sub now' : 'Water break soon') : st === 'due' ? 'Sub now' : 'Get ready to sub'}</h2>
-      <p class="pair-hint">${brk ? 'Clock keeps running. ' : ''}Suggested swaps. Tap one to keep that player on.</p>
+      <p class="pair-hint">${brk ? 'Clock keeps running. ' : ''}${q ? 'Your queued subs.' : 'Suggested swaps.'} Tap one to keep that player on.</p>
       <ul class="pairs">${pairs.map(([o, i]) => { const kept = view.keep.has(o.id); return `
         <li><button class="pair ${kept ? 'kept' : ''}" data-act="toggle-pair" data-id="${o.id}" aria-pressed="${!kept}" aria-label="${kept ? `Keep ${esc(o.name)} on` : `${esc(o.name)} off, ${esc(i.name)} on`}">
           <span class="po"><small>${kept ? (o.gk ? 'Stays in goal' : 'Stays on') : `${I.down}${o.gk ? 'Out of goal' : 'Off'}`}</small><b>${esc(o.name)}</b></span>
@@ -831,9 +849,9 @@ function renderLive() {
     </section>`
   : pairs.length ? `
     <section class="ondeck">
-      <span class="od-k">Up next</span>
+      <span class="od-k">${q ? 'Queued' : 'Up next'}</span>
       <span class="od-v">${chosen.length ? chosen.map(([o, i]) => `<span class="od-pair"><i class="tagx on">${I.up}${esc(i.name)}</i><i class="tagx off">${I.down}${esc(o.name)}</i></span>`).join('') : 'Everyone stays on'}${brk ? '<small>at the water break</small>' : ''}</span>
-      ${chosen.length ? '<button class="link" data-act="do-subs">Sub now</button>' : ''}
+      <span class="od-btns">${chosen.length ? '<button class="link" data-act="do-subs">Sub now</button>' : ''}${q ? '<button class="link" data-act="clear-queue">Clear</button>' : ''}</span>
     </section>` : ''}
 
   ${!g.qOver && bench.length && !(pairs.length && (st === 'due' || st === 'soon')) ? `
@@ -1106,6 +1124,8 @@ function renderSheet() {
     const nOn = s.on.length, nOff = s.off.length;
     const pairs = pickedPairs(g, s);
     const gkIn = pairs.find(([o]) => o.gk)?.[1];
+    const canQueue = !s.planned && subStatus(g, t) === 'wait';
+    const subs = plural(pairs.length, 'sub');
     const tag = (icon, word) => `<i class="pk-tag">${icon}${word}</i>`;
     body = `<h2>Pick subs</h2>
       <h3>Coming on <small>tap as many as you like · most owed first</small></h3>
@@ -1117,7 +1137,10 @@ function renderSheet() {
       ${gkIn ? `<p class="hint">${I.glove} <b>${esc(gkIn.name)}</b> goes in goal (first picked to go on).</p>` : ''}
       <button class="cta" data-act="ps-go" ${pairs.length ? '' : 'disabled'}>
         <span class="cta-k">${!nOn && !nOff ? 'Tap who\'s coming on' : nOff < nOn ? `Pick ${nOn - nOff} more to come off` : nOn < nOff ? `Pick ${nOff - nOn} more to come on` : `${nOn} on · ${nOff} off`}</span>
-        <span class="cta-t">${pairs.length ? `Make ${plural(pairs.length, 'sub')}` : 'Make subs'}</span></button>`;
+        <span class="cta-t">${pairs.length ? `Make ${subs} now` : 'Make subs now'}</span></button>
+      ${canQueue ? `<button class="cta queue" data-act="ps-queue" ${pairs.length ? '' : 'disabled'}>
+        <span class="cta-k">At the next sub window · ${fmt(g.nextSubAt - g.qStart)}${isBreak(g, g.nextSubAt) ? ', water break' : ''} · in ${fmt(g.nextSubAt - t)}</span>
+        <span class="cta-t">Queue ${pairs.length ? subs : 'subs'}</span></button>` : ''}`;
   }
   else if (s.type === 'menu') {
     const inLive = g.phase === 'live';
@@ -1215,8 +1238,19 @@ const actions = {
   },
   'ps-go': () => {
     const g = G(), s = view.sheet, pairs = pickedPairs(g, s);
-    if (pairs.length) doSubs(pairs, s.planned && ['due', 'soon'].includes(subStatus(g, now(g))));
+    if (!pairs.length) return;
+    g.queue = null; // making them now replaces anything queued
+    doSubs(pairs, s.planned && ['due', 'soon'].includes(subStatus(g, now(g))));
   },
+  'ps-queue': () => {
+    const g = G(), s = view.sheet, pairs = pickedPairs(g, s);
+    if (!pairs.length || g.nextSubAt == null) return;
+    pushUndo();
+    g.queue = { at: g.nextSubAt, pairs: pairs.map(([o, i]) => [o.id, i.id]) };
+    view.keep.clear();
+    view.sheet = null; save(); render();
+  },
+  'clear-queue': () => { pushUndo(); G().queue = null; view.keep.clear(); save(); render(); },
   'make-gk': d => makeGoalie(d.id),
   // A goalie change at the water break doesn't use up the break's planned subs.
   'gk-swap': d => { const g = G(), t = now(g); pushUndo(); swap(g.players[d.off], g.players[d.on], t); view.sheet = null; save(); render(); },
