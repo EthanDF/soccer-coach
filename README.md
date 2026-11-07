@@ -55,6 +55,8 @@ Each finished game appends one row per player (date, opponent, minutes, goalie m
 | `apps-script/` | Google Sheet receiver (clasp project) |
 | `scripts/setup-sheet.sh` | One-command sheet setup + phone connect link |
 
+**Releasing:** bump `APP_VERSION` in `app.js` and `VERSION` in `sw.js` (`ac-v<N>`) together. The version shows at the bottom of Home and Settings, so you can check what a phone is running.
+
 ## Ideas for v2
 
 - Native iOS / watchOS companion for locked-screen and Apple Watch sub alerts

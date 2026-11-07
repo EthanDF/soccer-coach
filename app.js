@@ -7,6 +7,9 @@
    correct if the phone sleeps or the app is backgrounded.
    ============================================================ */
 
+// Shown on Home and in Settings to check which build a phone is running.
+// Bump it with VERSION in sw.js (ac-v<N>) on every release.
+const APP_VERSION = 10;
 const KEY = 'assistant-coach.v1';
 const QUARTERS = 4;
 const TARGET_RUN = 300;  // ideal time on the field per shift (s)
@@ -675,6 +678,7 @@ function renderHome() {
     </div>
 
     <button class="ghost" data-act="go" data-to="settings">Settings & Google Sheet sync</button>
+    <p class="version">Version ${APP_VERSION}</p>
   </section>`;
 }
 
@@ -1040,6 +1044,7 @@ function renderSettings() {
       <div class="card-h"><h2>How subs are planned</h2></div>
       <p class="hint">The app aims for shifts of about ${fmt(TARGET_RUN)}, keeps bench time under about ${fmt(MAX_REST)} when the roster allows, and won't ask you to sub more often than every ${fmt(MIN_GAP)}. Sub windows divide each period evenly. Breaks between periods, and the water break, are always sub points. Goalies stay in for the period (you can switch at the water break), and goalie time counts as playing time.</p>
     </div>
+    <p class="version">Version ${APP_VERSION}</p>
   </section>`;
 }
 
